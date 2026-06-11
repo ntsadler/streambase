@@ -25,7 +25,7 @@ except ImportError:
 
 EXCLUDED_DIRS = {".git", ".venv", "__pycache__", "local_data"}
 EXCLUDED_SUFFIXES = {".pyc", ".zip", ".sqlite"}
-EXCLUDED_PATHS = {"data/report.json", "data/playlists_raw.json"}
+EXCLUDED_PATHS = {".env", "data/report.json", "data/playlists_raw.json"}
 
 
 def api(path, method="GET", payload=None):
