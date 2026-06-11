@@ -5,6 +5,11 @@ from typing import Dict, List, Optional
 
 import requests
 
+from src.settings import load_local_env
+
+
+load_local_env()
+
 
 API_BASE = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"

@@ -39,6 +39,25 @@ export SPOTIFY_CLIENT_ID="..."
 export SPOTIFY_CLIENT_SECRET="..."
 ```
 
+Or create a local `.env` file, which is ignored by git:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env`:
+
+```bash
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
+```
+
+Test the connection:
+
+```bash
+python3 scripts/test_spotify.py
+```
+
 Chartmetric is scaffolded behind an environment-driven connector:
 
 ```bash
