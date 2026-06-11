@@ -113,12 +113,14 @@ def audio_summary(uploaded_file) -> Dict:
     return summary
 
 
-def _score_lane(text: str, lane: Dict, summary=None, spotify_track=None) -> Dict:
+def _score_lane(text: str, lane: Dict, summary=None, spotify_track=None, cyanite_profile=None) -> Dict:
     summary = summary or {}
     spotify_track = spotify_track or {}
+    cyanite_profile = cyanite_profile or {}
     hits = [k for k in lane["keywords"] if k in text]
     score = min(100, 35 + len(hits) * 16) if hits else 20
     energy = summary.get("energy_label", "")
+    cyanite_energy = str(cyanite_profile.get("energy", "")).lower()
     popularity = int(spotify_track.get("popularity") or 0)
     duration_ms = int(spotify_track.get("duration_ms") or 0)
     release = release_profile(spotify_track)
@@ -128,6 +130,12 @@ def _score_lane(text: str, lane: Dict, summary=None, spotify_track=None) -> Dict
     if energy == "low" and any(k in lane["lane"].lower() for k in ["chill", "moody", "songwriter"]):
         score += 8
         hits.append("low energy")
+    if cyanite_energy in {"high", "energetic"} and any(k in lane["lane"].lower() for k in ["dance", "pop", "rock"]):
+        score += 10
+        hits.append("cyanite high energy")
+    if cyanite_energy in {"low", "calm"} and any(k in lane["lane"].lower() for k in ["chill", "moody", "songwriter"]):
+        score += 10
+        hits.append("cyanite low energy")
     if popularity and popularity < 45 and "discovery" in lane["lane"].lower() and not release.get("exclude_new_release_playlists"):
         score += 12
         hits.append("emerging artist signal")
@@ -181,6 +189,35 @@ def merge_song_metadata(title="", artist="", reference_artists="", descriptors="
         "descriptors": "; ".join([x for x in [descriptors, spotify_track.get("descriptors", ""), spotify_track.get("album", "")] if x]),
     }
     return merged
+
+
+def merge_reference_track_profile(reference_tracks: List[Dict]) -> Dict:
+    tracks = [t for t in reference_tracks or [] if t]
+    if not tracks:
+        return {}
+    artists = []
+    descriptors = []
+    titles = []
+    popularity_values = []
+    for track in tracks:
+        titles.append(track.get("title", ""))
+        artists.extend(split_terms(track.get("artist", "")))
+        artists.extend(split_terms(track.get("reference_artists", "")))
+        descriptors.extend(split_terms(track.get("descriptors", "")))
+        if track.get("album"):
+            descriptors.append(track["album"])
+        if track.get("popularity") not in {"", None}:
+            popularity_values.append(int(track.get("popularity") or 0))
+    unique_artists = sorted({a for a in artists if a})
+    unique_descriptors = sorted({d for d in descriptors if d})
+    avg_popularity = round(sum(popularity_values) / len(popularity_values), 1) if popularity_values else ""
+    return {
+        "track_count": len(tracks),
+        "titles": [t for t in titles if t],
+        "reference_artists": "; ".join(unique_artists),
+        "descriptors": "; ".join(unique_descriptors),
+        "average_popularity": avg_popularity,
+    }
 
 
 def spotify_summary(spotify_track: Dict) -> Dict:
@@ -243,13 +280,20 @@ def discovery_searches(top_lanes, song, release=None):
     return searches
 
 
-def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", descriptors="", saved_playlists=None, spotify_track=None) -> Dict:
+def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", descriptors="", saved_playlists=None, spotify_track=None, reference_tracks=None, cyanite_profile=None) -> Dict:
     summary = audio_summary(uploaded_file)
+    reference_profile = merge_reference_track_profile(reference_tracks or [])
+    cyanite_profile = cyanite_profile or {}
+    if reference_profile:
+        reference_artists = "; ".join([x for x in [reference_artists, reference_profile.get("reference_artists", "")] if x])
+        descriptors = "; ".join([x for x in [descriptors, reference_profile.get("descriptors", "")] if x])
+    if cyanite_profile:
+        descriptors = "; ".join([x for x in [descriptors, cyanite_profile.get("descriptors", "")] if x])
     merged = merge_song_metadata(title, artist, reference_artists, descriptors, spotify_track)
     release = release_profile(spotify_track or {})
     references = split_terms(merged["reference_artists"])
-    text = " ".join([merged["title"], merged["artist"], merged["reference_artists"], merged["descriptors"], summary.get("file_name", ""), summary.get("energy_label", "")]).lower()
-    lanes = sorted([_score_lane(text, lane, summary, spotify_track) for lane in PLAYLIST_LANES], key=lambda x: x["score"], reverse=True)
+    text = " ".join([merged["title"], merged["artist"], merged["reference_artists"], merged["descriptors"], summary.get("file_name", ""), summary.get("energy_label", ""), str(cyanite_profile.get("energy", "")), str(cyanite_profile.get("voice", ""))]).lower()
+    lanes = sorted([_score_lane(text, lane, summary, spotify_track, cyanite_profile) for lane in PLAYLIST_LANES], key=lambda x: x["score"], reverse=True)
     top_lanes = [lane for lane in lanes if not lane.get("excluded_for_release_age")][:3]
     matches = []
     for playlist in saved_playlists or []:
@@ -261,6 +305,8 @@ def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", d
         "song": {"title": merged["title"], "artist": merged["artist"], "reference_artists": references, "descriptors": merged["descriptors"]},
         "audio_summary": summary,
         "spotify_summary": spotify_summary(spotify_track or {}),
+        "reference_track_summary": reference_profile,
+        "cyanite_summary": cyanite_profile,
         "release_guidance": {
             **release,
             "message": "Older catalog track: Streambase will avoid playlists explicitly focused on new releases." if release.get("exclude_new_release_playlists") else "Release age is compatible with new-release and evergreen playlist pitching.",
@@ -269,7 +315,8 @@ def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", d
         "saved_playlist_matches": matches,
         "discovery_searches": discovery_searches(top_lanes, {"artist": merged["artist"], "reference_artists": references}, release),
         "next_steps": [
-            "Add 3-8 accurate reference artists before outreach.",
+            "Add 3-8 accurate reference artists or reference songs before outreach.",
+            "Use Cyanite audio tags when available for sound-based playlist fit.",
             "Use the top lane names as search terms for new playlist discovery.",
             "Prioritize saved playlist matches with both reference artist overlap and existing curator contact data.",
         ],

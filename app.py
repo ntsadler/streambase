@@ -1,22 +1,24 @@
 import json, pandas as pd, streamlit as st
 from src.chartmetric import chartmetric_status
+from src.cyanite import cyanite_status,normalize_cyanite_tags
 from src.database import init_db,get_curator_profiles,get_all_playlists,add_outreach_event,update_playlist_status,get_email_queue,update_email_queue_status,save_song_fit_targets,get_song_fit_targets
 from src.ingest_playlists import load_playlists_from_text,playlists_from_links,save_raw_json
 from src.pipeline import process_playlists
 from src.settings import DB_PATH,LOCAL_DATA_DIR
 from src.song_analyzer import analyze_song_fit,score_spotify_playlist_candidates
-from src.spotify_api import SpotifyAPI,fetch_spotify_track,search_spotify_playlists
+from src.spotify_api import SpotifyAPI,fetch_spotify_track,fetch_spotify_tracks,search_spotify_playlists
 from src.web_enricher import enrich_playlist_from_url,enrich_track_from_url
 st.set_page_config(page_title='Streambase',page_icon='🎛️',layout='wide')
 st.title('🎛️ Streambase')
 st.caption('Playlist intelligence, curator contact stack, and outreach CRM for independent music growth.')
 init_db()
 with st.sidebar:
-    spotify=SpotifyAPI(); cm=chartmetric_status()
+    spotify=SpotifyAPI(); cm=chartmetric_status(); cy=cyanite_status()
     st.header('Settings'); do_web=st.toggle('Fetch public contact info',value=True); do_spotify=st.toggle('Use Spotify API connector',value=spotify.configured,disabled=not spotify.configured); queue_email=st.toggle('Queue emails for approval',value=True)
     st.markdown('#### Connector status')
     st.write(f"Spotify API: {'connected' if spotify.configured else 'not connected'}")
     st.write(f"Chartmetric: {'connected' if cm['configured']=='yes' else 'not connected'}")
+    st.write(f"Cyanite: {'connected' if cy['configured']=='yes' else 'not connected'}")
     st.markdown('#### Local data')
     st.caption(f"Private data dir: {LOCAL_DATA_DIR}")
     st.caption(f"SQLite: {DB_PATH}")
@@ -27,6 +29,7 @@ if 'playlists' not in st.session_state: st.session_state.playlists=[]
 if 'report' not in st.session_state: st.session_state.report=None
 if 'song_fit' not in st.session_state: st.session_state.song_fit=None
 if 'song_spotify' not in st.session_state: st.session_state.song_spotify={}
+if 'reference_spotify_tracks' not in st.session_state: st.session_state.reference_spotify_tracks=[]
 if 'spotify_playlist_candidates' not in st.session_state: st.session_state.spotify_playlist_candidates=[]
 def df_session():
     df=pd.DataFrame(st.session_state.playlists) if st.session_state.playlists else pd.DataFrame(columns=['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description'])
@@ -84,12 +87,24 @@ with tab_song:
                 else: st.warning('No Spotify metadata found. Add title, artist, references, and descriptors manually.')
     with c0b:
         if st.button('Clear Song Metadata',use_container_width=True):
-            st.session_state.song_spotify={}; st.session_state.song_fit=None; st.rerun()
+            st.session_state.song_spotify={}; st.session_state.reference_spotify_tracks=[]; st.session_state.song_fit=None; st.rerun()
+    reference_links=st.text_area('Reference song links',height=110,placeholder='Optional: paste 3-5 Spotify track links, one per line, that sound like your song.')
+    if st.button('Fetch Reference Song Metadata',use_container_width=True):
+        refs=[line.strip() for line in reference_links.splitlines() if line.strip()]
+        if not refs: st.error('Paste at least one Spotify reference track link first.')
+        elif not spotify.configured: st.error('Spotify API credentials are required for reference song metadata.')
+        else:
+            st.session_state.reference_spotify_tracks=fetch_spotify_tracks(refs)
+            st.success(f"Loaded {len(st.session_state.reference_spotify_tracks)} reference song(s).")
     song_file=st.file_uploader('Upload song file',type=['wav','mp3','m4a','aiff','flac'])
     spotify_meta=st.session_state.song_spotify or {}
     if spotify_meta:
         st.markdown('#### Spotify metadata')
         st.json(spotify_meta,expanded=False)
+    reference_meta=st.session_state.reference_spotify_tracks or []
+    if reference_meta:
+        st.markdown('#### Reference song metadata')
+        st.dataframe(pd.DataFrame(reference_meta)[[c for c in ['title','artist','descriptors','popularity','release_date','spotify_url'] if c in pd.DataFrame(reference_meta).columns]],use_container_width=True,hide_index=True)
     c1,c2=st.columns(2)
     with c1:
         song_title=st.text_input('Song title',value=spotify_meta.get('title',''))
@@ -97,10 +112,19 @@ with tab_song:
     with c2:
         song_refs=st.text_input('Reference artists',value=spotify_meta.get('reference_artists',''),placeholder='MGMT; LCD Soundsystem; Tame Impala')
         song_desc=st.text_input('Descriptors',value=spotify_meta.get('descriptors',''),placeholder='indie dance; synth; upbeat; late night')
+    st.markdown('#### Audio intelligence')
+    cyanite_raw=st.text_area('Cyanite tags JSON',height=100,placeholder='Optional: paste Cyanite genre/mood/tag JSON here when available.')
+    cyanite_profile={}
+    if cyanite_raw.strip():
+        try:
+            cyanite_profile=normalize_cyanite_tags(json.loads(cyanite_raw))
+            st.success('Cyanite tags parsed.')
+        except json.JSONDecodeError:
+            st.error('Cyanite tags must be valid JSON.')
     if st.button('Analyze Song Fit',type='primary',use_container_width=True):
         if not song_file and not spotify_meta and not (song_title or song_artist or song_refs or song_desc): st.error('Upload a song, paste a Spotify track link, or add song details first.')
         else:
-            st.session_state.song_fit=analyze_song_fit(song_file,song_title,song_artist,song_refs,song_desc,get_all_playlists(),spotify_meta)
+            st.session_state.song_fit=analyze_song_fit(song_file,song_title,song_artist,song_refs,song_desc,get_all_playlists(),spotify_meta,reference_meta,cyanite_profile)
     fit=st.session_state.song_fit
     if fit:
         summary=fit.get('audio_summary') or {}
@@ -111,6 +135,14 @@ with tab_song:
         if spotify_summary:
             st.markdown('#### Spotify summary')
             st.json(spotify_summary,expanded=False)
+        reference_summary=fit.get('reference_track_summary') or {}
+        if reference_summary:
+            st.markdown('#### Reference song summary')
+            st.json(reference_summary,expanded=False)
+        cyanite_summary=fit.get('cyanite_summary') or {}
+        if cyanite_summary:
+            st.markdown('#### Cyanite summary')
+            st.json(cyanite_summary,expanded=False)
         release_guidance=fit.get('release_guidance') or {}
         if release_guidance:
             st.markdown('#### Release guidance')

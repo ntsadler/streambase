@@ -104,6 +104,57 @@ class SongAnalyzerTests(unittest.TestCase):
         self.assertTrue(scored[0]["already_in_crm"])
         self.assertGreater(scored[0]["candidate_fit_score"], 0)
 
+    def test_reference_tracks_feed_lane_and_search_context(self):
+        meta = {
+            "title": "My Track",
+            "artist": "Test Artist",
+            "release_date": "2026-05-01",
+        }
+        reference_tracks = [
+            {
+                "title": "Reference One",
+                "artist": "LCD Soundsystem",
+                "reference_artists": "LCD Soundsystem",
+                "descriptors": "indie dance; electronic; synth",
+                "popularity": 55,
+            },
+            {
+                "title": "Reference Two",
+                "artist": "MGMT",
+                "reference_artists": "MGMT",
+                "descriptors": "indie pop; synth",
+                "popularity": 60,
+            },
+        ]
+
+        result = analyze_song_fit(None, saved_playlists=[], spotify_track=meta, reference_tracks=reference_tracks)
+
+        self.assertEqual(result["recommended_playlist_lanes"][0]["lane"], "Indie electronic / alt dance")
+        self.assertIn("MGMT", result["reference_track_summary"]["reference_artists"])
+        self.assertTrue(any("MGMT" in s["search_query"] for s in result["discovery_searches"]))
+
+    def test_cyanite_tags_feed_lane_context(self):
+        meta = {
+            "title": "Soft Track",
+            "artist": "Test Artist",
+            "release_date": "2026-05-01",
+        }
+        cyanite = {
+            "source": "cyanite",
+            "genres": ["bedroom pop"],
+            "moods": ["dreamy", "chill"],
+            "instruments": ["soft synth"],
+            "keywords": [],
+            "energy": "low",
+            "descriptors": "bedroom pop; dreamy; chill; soft synth",
+        }
+
+        result = analyze_song_fit(None, saved_playlists=[], spotify_track=meta, cyanite_profile=cyanite)
+
+        self.assertEqual(result["recommended_playlist_lanes"][0]["lane"], "Bedroom pop / chill indie")
+        self.assertIn("bedroom pop", result["song"]["descriptors"])
+        self.assertEqual(result["cyanite_summary"]["source"], "cyanite")
+
 
 if __name__ == "__main__":
     unittest.main()

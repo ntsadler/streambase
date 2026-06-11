@@ -221,6 +221,23 @@ def fetch_spotify_track(track_url_or_id: str) -> Dict:
         return {}
 
 
+def fetch_spotify_tracks(track_urls_or_ids: List[str]) -> List[Dict]:
+    client = SpotifyAPI()
+    if not client.configured:
+        return []
+    tracks = []
+    for value in track_urls_or_ids:
+        if not value:
+            continue
+        try:
+            meta = client.normalize_track(value)
+        except requests.RequestException:
+            meta = {}
+        if meta:
+            tracks.append(meta)
+    return tracks
+
+
 def search_spotify_playlists(queries: List[str], limit_per_query: int = 8, market: str = "US") -> Dict:
     client = SpotifyAPI()
     if not client.configured:
