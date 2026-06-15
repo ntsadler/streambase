@@ -1,0 +1,24 @@
+{
+  "core_bands": {
+    "MGMT": 1.0,
+    "LCD Soundsystem": 1.0,
+    "Empire of the Sun": 1.0
+  },
+  "expanded_bands": {
+    "Arcade Fire": 0.7,
+    "Franz Ferdinand": 0.7,
+    "Tame Impala": 0.7,
+    "Hot Chip": 0.7,
+    "Jungle": 0.7,
+    "Roosevelt": 0.7,
+    "Phoenix": 0.7
+  },
+  "vibe_tags": {
+    "indie dance": 0.35,
+    "psychedelic pop": 0.35,
+    "electro rock": 0.35,
+    "dance punk": 0.35,
+    "synth pop": 0.35,
+    "indie disco": 0.35
+  }
+}

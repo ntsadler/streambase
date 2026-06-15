@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Private Streambase working data
+local_data/
+local_data_test/
+data/*.sqlite
+data/audio_uploads/
+data/song_profiles.json
+data/artist_sound_profile.json
+data/report.json
+data/playlists_raw.json
+exports/
+*.csv
+
+# Packaged artifacts
+*.zip
