@@ -787,19 +787,36 @@ with tab_playlists:
             display['playlist_name']=display['name']
         if 'url' in display.columns and 'playlist_url' not in display.columns:
             display['playlist_url']=display['url']
-        for col in ['playlist_name','curator_name','final_score','priority','followers','similarity_score','intersection_score','status','playlist_url']:
+        display['rating_confidence']=0
+        display['rating_evidence']=''
+        if 'scoring_notes' in display.columns:
+            for idx,note in display['scoring_notes'].fillna('').items():
+                try:
+                    parsed=json.loads(note) if note else {}
+                except json.JSONDecodeError:
+                    parsed={}
+                display.at[idx,'rating_confidence']=parsed.get('confidence_score',0)
+                display.at[idx,'rating_evidence']='; '.join(parsed.get('evidence',[]))
+        if 'priority' in display.columns:
+            display['priority']=display.apply(
+                lambda row: 'needs review' if str(row.get('priority','')).lower()=='ignore' and float(row.get('rating_confidence') or 0)<35 else 'low fit' if str(row.get('priority','')).lower()=='ignore' else row.get('priority',''),
+                axis=1,
+            )
+        for col in ['playlist_name','curator_name','final_score','priority','rating_confidence','rating_evidence','followers','similarity_score','intersection_score','status','playlist_url']:
             if col not in display.columns:
                 display[col]=''
         display=display.sort_values('final_score',ascending=False)
         st.markdown('#### Saved Playlists')
         st.dataframe(
-            display[['playlist_name','final_score','priority','followers','curator_name','similarity_score','intersection_score','status','playlist_url']],
+            display[['playlist_name','final_score','priority','rating_confidence','rating_evidence','followers','curator_name','similarity_score','intersection_score','status','playlist_url']],
             use_container_width=True,
             hide_index=True,
             column_config={
                 'playlist_name':st.column_config.TextColumn('Playlist'),
                 'final_score':st.column_config.ProgressColumn('Rating',min_value=0,max_value=100,format='%.0f'),
                 'priority':st.column_config.TextColumn('Decision'),
+                'rating_confidence':st.column_config.ProgressColumn('Confidence',min_value=0,max_value=100,format='%.0f'),
+                'rating_evidence':st.column_config.TextColumn('Evidence'),
                 'followers':st.column_config.NumberColumn('Followers',format='%d'),
                 'curator_name':st.column_config.TextColumn('Curator'),
                 'similarity_score':st.column_config.NumberColumn('Similarity',format='%.0f'),
@@ -820,7 +837,8 @@ with tab_playlists:
                 st.write(f"Email: {item.get('email') or 'Not found'} | Instagram: {item.get('instagram') or 'Not found'} | Submission: {item.get('submission_page') or 'Not found'}")
                 st.write(f"SubmitHub verified: {'yes' if item.get('submithub_verified') else 'no'} | SubmitHub URL: {item.get('submithub_url') or 'Not found'}")
                 breakdown=(item.get('similarity_breakdown') or {})
-                scoring=(item.get('scoring_notes') or {})
+                if item.get('rating_confidence') is not None:
+                    st.write(f"Rating confidence: {item.get('rating_confidence')} | Evidence: {'; '.join(item.get('rating_evidence') or []) or 'limited evidence'}")
                 guard=item.get('outreach_guard') or {}
                 if item.get('email_queue_blocked'):
                     st.warning(item.get('email_queue_block_reason') or guard.get('reason') or 'Email queue blocked by playlist safeguard.')
