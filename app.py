@@ -1,12 +1,13 @@
 import importlib, json, time, pandas as pd, streamlit as st
 from src.audio_analysis import save_uploaded_song_file
+from src.campaigns import prepare_campaign_plan
 from src.chartmetric import chartmetric_status
 from src.chartmetric_mining import run_chartmetric_mining
 from src.cyanite import cyanite_status,fetch_cyanite_analysis,upload_song_audio_to_cyanite
-from src.database import init_db,get_curator_profiles,get_all_playlists,add_outreach_event,update_playlist_status,get_email_queue,update_email_queue_status,get_song_fit_targets,bulk_upsert_artist_songs,get_artist_songs,save_artist_sound_profile,get_artist_sound_profile,bulk_upsert_release_songs,get_release_songs,save_release_campaign_brief,get_release_campaigns,backup_song_profiles_json,bulk_upsert_artist_references,get_artist_references,get_mining_jobs,get_mined_playlists
+from src.database import init_db,get_all_playlists,add_outreach_event,update_playlist_status,queue_email,playlist_outreach_guard,get_song_fit_targets,bulk_upsert_artist_songs,get_artist_songs,save_artist_sound_profile,get_artist_sound_profile,bulk_upsert_release_songs,get_release_songs,save_release_campaign_brief,get_release_campaigns,backup_song_profiles_json,bulk_upsert_artist_references,get_artist_references,get_mining_jobs,get_mined_playlists
 from src.ingest_playlists import load_playlists_from_text,playlists_from_links,save_raw_json
 from src.pipeline import process_playlists
-from src.settings import DB_PATH,LOCAL_DATA_DIR
+from src.settings import DB_PATH,LOCAL_DATA_DIR,local_data_path
 from src.song_analyzer import analyze_song_fit,score_spotify_playlist_candidates
 import src.playlist_discovery as playlist_discovery
 from src.spotify_api import ENGLISH_SPOTIFY_MARKETS,SpotifyAPI,fetch_spotify_track,search_spotify_playlists_multi_market
@@ -141,9 +142,23 @@ if 'home_playlist_searches' not in st.session_state: st.session_state.home_playl
 if 'home_spotify_playlist_candidates' not in st.session_state: st.session_state.home_spotify_playlist_candidates=[]
 if 'batch_playlist_candidates' not in st.session_state: st.session_state.batch_playlist_candidates=[]
 if 'batch_playlist_log' not in st.session_state: st.session_state.batch_playlist_log=[]
+if 'campaign_plan' not in st.session_state: st.session_state.campaign_plan={}
+if 'campaign_copy_edits' not in st.session_state: st.session_state.campaign_copy_edits={}
 if 'pitch_release_type' not in st.session_state: st.session_state.pitch_release_type='new_release'
 if 'pitch_spotify_url' not in st.session_state: st.session_state.pitch_spotify_url=''
 if 'pitch_spotify_meta' not in st.session_state: st.session_state.pitch_spotify_meta={}
+def load_latest_report():
+    if st.session_state.report:
+        return st.session_state.report
+    path=local_data_path('report.json')
+    if not path.exists():
+        return {}
+    try:
+        report=json.loads(path.read_text(encoding='utf-8'))
+    except (json.JSONDecodeError,OSError):
+        return {}
+    st.session_state.report=report
+    return report
 def df_session():
     df=pd.DataFrame(st.session_state.playlists) if st.session_state.playlists else pd.DataFrame(columns=['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description'])
     for col in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description']:
@@ -202,7 +217,7 @@ def catalog_tag_summary(catalog_rows):
             counts[key]['song_count']+=1
     return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_catalog,tab_playlists,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Playlists','Curator CRM','Email Queue'])
+tab_scan,tab_catalog,tab_playlists,tab_campaigns=st.tabs(['Scan A Song','Catalog','Playlists','Campaigns'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -769,7 +784,7 @@ with tab_playlists:
                 if st.button('Clear Loaded Playlists',use_container_width=True):
                     st.session_state.playlists=[]; st.session_state.report=None; st.rerun()
 
-    rep=st.session_state.report
+    rep=load_latest_report()
     rows=get_all_playlists()
     if rep:
         a,b,c=st.columns(3)
@@ -847,55 +862,129 @@ with tab_playlists:
                 st.text_area('Email',item.get('email_message',''),height=160,key=f"e_{item.get('playlist_url')}")
                 st.text_area('Instagram DM',item.get('instagram_dm',''),height=90,key=f"d_{item.get('playlist_url')}")
                 st.text_area('Submission note',item.get('submission_note',''),height=90,key=f"s_{item.get('playlist_url')}")
-with tab_curators:
-    st.subheader('Curator CRM')
-    curators=get_curator_profiles()
-    if not curators: st.info('No curators saved yet.')
-    for cur in curators:
-        playlists=cur.get('playlists',[]); methods=cur.get('contact_methods',[]); events=cur.get('outreach_events',[]); best=max([p.get('final_score') or 0 for p in playlists],default=0)
-        with st.expander(f"{cur['display_name']} · {len(playlists)} playlist(s) · best score {best}"):
-            l,r=st.columns([1,1])
-            with l:
-                st.markdown('#### Playlists'); st.dataframe(pd.DataFrame(playlists),use_container_width=True,hide_index=True) if playlists else st.caption('No playlists.')
-                st.markdown('#### Contact methods'); st.dataframe(pd.DataFrame(methods),use_container_width=True,hide_index=True) if methods else st.caption('No contact methods found.')
-            with r:
-                top=playlists[0] if playlists else {}; pid=int(top.get('id') or 0); cid=int(cur['id'])
-                st.markdown('#### Outreach actions')
-                em=next((m for m in methods if m['type']=='email'),None); ig=next((m for m in methods if m['type']=='instagram'),None); sub=next((m for m in methods if m['type']=='submission_page'),None)
-                if em: st.link_button('Open Email',f"mailto:{em['value']}",use_container_width=True)
-                if ig: st.link_button('Open Instagram',ig['value'],use_container_width=True)
-                if sub: st.link_button('Open Submission Page',sub['value'],use_container_width=True)
-                ch=st.selectbox('Log outreach channel',['email','instagram','submission_page','website'],key=f'ch_{cid}')
-                ev=st.selectbox('Log event',['drafted','sent','replied','submitted','added_song','ignored'],key=f'ev_{cid}')
-                msg=st.text_area('Notes/message',key=f'msg_{cid}',height=100)
-                if st.button('Log Outreach Event',key=f'log_{cid}',use_container_width=True):
-                    add_outreach_event(cid,pid,ch,ev,msg)
-                    if pid and ev in {'sent','submitted','ignored'}: update_playlist_status(pid,ev)
-                    st.success('Outreach event logged.'); st.rerun()
-                st.markdown('#### History'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('No outreach history yet.')
-with tab_email:
-    st.subheader('Email approval queue')
-    q=get_email_queue()
-    if not q: st.info('No queued email drafts yet.')
-    for item in q:
-        label=f"{item.get('status')} · {item.get('curator_name') or 'Unknown'} · {item.get('playlist_name') or 'playlist'}"
-        with st.expander(label):
-            st.write(f"To: {item.get('to_email')}")
-            st.write(f"Subject: {item.get('subject')}")
-            st.write(f"Song: {item.get('song_title') or 'Not saved on this draft'}")
-            if item.get('song_url'):
-                st.write(f"Song link: {item.get('song_url')}")
-            else:
-                st.warning('No song link is saved on this draft. Verify the body manually before approving; older drafts may predate the Spotify-link safeguard.')
-            st.text_area('Draft body',item.get('body',''),height=180,key=f"qbody_{item['id']}")
-            c1,c2,c3=st.columns(3)
-            with c1:
-                if st.button('Approve',key=f"approve_{item['id']}",use_container_width=True):
-                    update_email_queue_status(item['id'],'approved'); st.rerun()
-            with c2:
-                if st.button('Mark Sent',key=f"sent_{item['id']}",use_container_width=True,disabled=item.get('status')!='approved'):
-                    update_email_queue_status(item['id'],'sent'); add_outreach_event(item['curator_id'],item['playlist_id'],'email','sent',item.get('body','')); update_playlist_status(item['playlist_id'],'sent'); st.rerun()
-                if item.get('status')!='approved': st.caption('Approve before marking sent.')
-            with c3:
-                if st.button('Reject',key=f"reject_{item['id']}",use_container_width=True):
-                    update_email_queue_status(item['id'],'rejected'); st.rerun()
+with tab_campaigns:
+    st.subheader('Campaigns')
+    st.caption('Prepare one clean outreach plan from the latest analyzed playlist candidates. streambase chooses the best song per playlist and avoids duplicate curator blasts.')
+    latest_report=load_latest_report()
+    processed_candidates=latest_report.get('processed_playlists',[])
+    if processed_candidates:
+        c1,c2=st.columns([1,1])
+        with c1:
+            if st.button('Prepare Campaign',type='primary',use_container_width=True):
+                st.session_state.campaign_plan=prepare_campaign_plan(
+                    processed_candidates,
+                    cooldown_days=int(playlist_cooldown_days),
+                    guard_fn=playlist_outreach_guard,
+                )
+                st.session_state.campaign_copy_edits={}
+        with c2:
+            st.caption(f"Latest analyzed candidates: {len(processed_candidates)}")
+    else:
+        saved_count=len(get_all_playlists())
+        if saved_count:
+            st.info(f"{saved_count} playlist(s) are saved, but no latest song-specific analysis report was found. Run Analyze & Save Playlists from the Playlists tab once, then Campaigns will load the generated emails, DMs, and submission links here.")
+        else:
+            st.info('Analyze and save playlists first. Campaigns are built from the latest playlist analysis so emails and DMs have song-specific context.')
+
+    plan=st.session_state.campaign_plan or {}
+    campaign_rows=plan.get('rows',[])
+    if campaign_rows:
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric('Ready',plan.get('ready_count',0))
+        m2.metric('Worth Considering',plan.get('worth_considering_count',0))
+        m3.metric('Wait',plan.get('wait_count',0))
+        m4.metric('Unique Playlists',plan.get('unique_playlist_count',0))
+        table_rows=[
+            {
+                'send':row.get('send',False),
+                'status':row.get('status',''),
+                'playlist_name':row.get('playlist_name',''),
+                'curator_name':row.get('curator_name',''),
+                'selected_song':row.get('selected_song',''),
+                'fit_score':row.get('fit_score',0),
+                'email':row.get('email',''),
+                'instagram':row.get('instagram',''),
+                'submission_page':row.get('submission_page',''),
+                'reason':row.get('reason',''),
+            }
+            for row in campaign_rows
+        ]
+        edited_campaign=st.data_editor(
+            pd.DataFrame(table_rows),
+            use_container_width=True,
+            hide_index=True,
+            key='campaign_review_editor',
+            disabled=['status','playlist_name','curator_name','selected_song','fit_score','email','instagram','submission_page','reason'],
+            column_config={
+                'send':st.column_config.CheckboxColumn('Send'),
+                'status':st.column_config.TextColumn('Status'),
+                'playlist_name':st.column_config.TextColumn('Playlist'),
+                'curator_name':st.column_config.TextColumn('Curator'),
+                'selected_song':st.column_config.TextColumn('Song'),
+                'fit_score':st.column_config.ProgressColumn('Fit',min_value=0,max_value=100,format='%.0f'),
+                'email':st.column_config.TextColumn('Email'),
+                'instagram':st.column_config.LinkColumn('Instagram'),
+                'submission_page':st.column_config.LinkColumn('Submission'),
+                'reason':st.column_config.TextColumn('Reason'),
+            },
+        )
+        send_flags=edited_campaign['send'].tolist() if not edited_campaign.empty else []
+        for idx,flag in enumerate(send_flags):
+            if idx<len(campaign_rows):
+                campaign_rows[idx]['send']=bool(flag)
+        labels=[f"{i+1}. {row.get('playlist_name') or 'playlist'} · {row.get('selected_song') or 'song'} · {row.get('status')}" for i,row in enumerate(campaign_rows)]
+        selected_label=st.selectbox('Review campaign copy',labels,key='campaign_copy_selector') if labels else ''
+        selected_idx=labels.index(selected_label) if selected_label in labels else 0
+        row=campaign_rows[selected_idx]
+        edit_key=row.get('playlist_url') or f"campaign_{selected_idx}"
+        st.markdown('#### Campaign Copy')
+        st.caption(row.get('reason',''))
+        if row.get('status')=='Worth considering':
+            st.warning(row.get('cooldown_note') or 'This is inside the cooldown window, but the fit is unusually strong.')
+        if row.get('alternates'):
+            st.caption('Other matching songs: '+', '.join([f"{alt.get('song')} ({alt.get('fit_score')})" for alt in row.get('alternates',[])]))
+        existing_edit=st.session_state.campaign_copy_edits.get(edit_key,{})
+        email_body=st.text_area('Email draft',existing_edit.get('email_message') or row.get('email_message',''),height=220,key=f"campaign_email_{selected_idx}")
+        dm_body=st.text_area('Instagram DM draft',existing_edit.get('instagram_dm') or row.get('instagram_dm',''),height=110,key=f"campaign_dm_{selected_idx}")
+        submission_body=st.text_area('Submission note',existing_edit.get('submission_note') or row.get('submission_note',''),height=110,key=f"campaign_submission_{selected_idx}")
+        st.session_state.campaign_copy_edits[edit_key]={'email_message':email_body,'instagram_dm':dm_body,'submission_note':submission_body}
+        l1,l2,l3=st.columns(3)
+        with l1:
+            if row.get('email'):
+                st.link_button('Open Email',f"mailto:{row.get('email')}",use_container_width=True)
+        with l2:
+            if row.get('instagram'):
+                st.link_button('Open Instagram',row.get('instagram'),use_container_width=True)
+        with l3:
+            if row.get('submission_page'):
+                st.link_button('Open Submission',row.get('submission_page'),use_container_width=True)
+        if st.button('Approve Selected Emails',type='primary',use_container_width=True):
+            queued=0
+            skipped=0
+            for idx,item in enumerate(campaign_rows):
+                if not item.get('send') or not item.get('email'):
+                    skipped+=1
+                    continue
+                raw=item.get('raw') or {}
+                raw_key=item.get('playlist_url') or f"campaign_{idx}"
+                edits=st.session_state.campaign_copy_edits.get(raw_key,{})
+                body=edits.get('email_message') or item.get('email_message','')
+                song_context=raw.get('song_context') if isinstance(raw.get('song_context'),dict) else {}
+                queue_id=queue_email(
+                    int(raw.get('curator_id') or 0),
+                    int(raw.get('playlist_id') or 0),
+                    item.get('email',''),
+                    f"Submission for {item.get('playlist_name') or 'your playlist'}",
+                    body,
+                    song_context=song_context,
+                    cooldown_days=int(playlist_cooldown_days),
+                    enforce_cooldown=item.get('status')!='Worth considering',
+                )
+                if queue_id:
+                    queued+=1
+                    add_outreach_event(int(raw.get('curator_id') or 0),int(raw.get('playlist_id') or 0),'email','drafted',body)
+                else:
+                    skipped+=1
+            st.success(f"Approved {queued} email draft(s). Skipped {skipped}.")
+    elif processed_candidates:
+        st.info('Click Prepare Campaign to build the review table.')
