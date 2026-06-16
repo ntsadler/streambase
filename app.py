@@ -175,8 +175,19 @@ def catalog_playlist_summary(catalog_rows, targets):
             'last_updated':song.get('updated_at') or song.get('created_at') or '',
         })
     return rows,detail
+def catalog_tag_summary(catalog_rows):
+    def split_tags(value):
+        return [tag.strip() for tag in str(value or '').split(';') if tag.strip()]
+    counts={}
+    for song in catalog_rows:
+        for tag in split_tags(song.get('genre_tags')):
+            key=tag.lower()
+            if key not in counts:
+                counts[key]={'tag':tag,'song_count':0}
+            counts[key]['song_count']+=1
+    return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_pitch,tab_catalog,tab_profile,tab_release,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Pitch Setup','Catalog','Artist Sound Profile','Release Prep Library','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
+tab_scan,tab_pitch,tab_catalog,tab_release,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Pitch Setup','Catalog','Release Prep Library','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -430,6 +441,20 @@ with tab_catalog:
         cm1,cm2=st.columns(2)
         cm1.metric('Uploaded Songs',len(catalog_display_rows))
         cm2.metric('Playlist Adds',total_playlist_adds)
+        all_genres=catalog_tag_summary(catalog_rows)
+        st.markdown('#### All Catalog Genres')
+        if all_genres:
+            st.dataframe(
+                pd.DataFrame(all_genres),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'tag':st.column_config.TextColumn('Genre'),
+                    'song_count':st.column_config.NumberColumn('Songs',format='%d'),
+                },
+            )
+        else:
+            st.info('No Cyanite genre tags are saved across the catalog yet.')
         st.markdown('#### Uploaded Catalog')
         st.caption('Click a song row to see every playlist saved for it.')
         catalog_df=pd.DataFrame(catalog_display_rows)
@@ -491,110 +516,6 @@ with tab_catalog:
     else:
         st.info('No uploaded songs yet. Songs appear here after they are uploaded from Scan A Song or Release Prep.')
     st.caption(f"Audio folder: data/audio_uploads · Song profile backup: data/song_profiles.json")
-with tab_profile:
-    st.subheader('Artist Sound Profile')
-    st.caption('Calibrate Streambase on your own catalog before mining Chartmetric or launching campaigns.')
-    uploads=st.file_uploader('Upload catalog songs',type=['wav','mp3'],accept_multiple_files=True)
-    if uploads and st.button('Save Uploaded Songs Locally',use_container_width=True):
-        saved=[]; errors=[]
-        for up in uploads:
-            result=save_uploaded_song_file(up)
-            if result.get('ok'):
-                saved.append({
-                    'title':result.get('title',''),
-                    'file_path':result.get('file_path',''),
-                    'bpm':'',
-                    'key':'',
-                    'genre_tags':'',
-                    'mood_tags':'',
-                    'energy':(result.get('audio_summary') or {}).get('energy_label',''),
-                    'danceability':'',
-                    'instrumentation':'',
-                    'vocal_style':'',
-                    'reference_artists':'',
-                    'notes':cyanite_ready_note(result.get('file_path','')),
-                })
-            else:
-                errors.append(result.get('error','Upload failed.'))
-        if saved:
-            bulk_upsert_artist_songs(saved); st.success(f"Saved {len(saved)} song record(s).")
-        for err in errors: st.error(err)
-    songs=get_artist_songs()
-    columns=['title','file_path','bpm','key','genre_tags','mood_tags','energy','danceability','instrumentation','vocal_style','reference_artists','notes']
-    if songs:
-        st.markdown('#### Song profile records')
-        st.caption('Edit these manually for now. Use semicolons for tags, for example `indie dance; psych pop; alternative electronic`.')
-        df=pd.DataFrame(songs)
-        for col in columns:
-            if col not in df.columns: df[col]=''
-        edited=st.data_editor(df[columns],use_container_width=True,num_rows='fixed',hide_index=True)
-        cprof1,cprof2=st.columns(2)
-        with cprof1:
-            if st.button('Save Edited Song Profiles',use_container_width=True):
-                bulk_upsert_artist_songs(edited.fillna('').to_dict(orient='records')); st.success('Song profiles saved.')
-        with cprof2:
-            if st.button('Generate Artist Sound Profile',type='primary',use_container_width=True):
-                profile=build_artist_sound_profile(edited.fillna('').to_dict(orient='records'),artist_references=get_artist_references(include_rejected=False))
-                path=save_artist_sound_profile(profile)
-                st.session_state.artist_sound_profile=profile
-                st.success(f"Artist Sound Profile saved to {path}.")
-    else:
-        st.info('Upload a few WAV or MP3 files to start building the artist calibration profile.')
-    stored=get_artist_sound_profile()
-    profile=st.session_state.artist_sound_profile or stored.get('profile') or {}
-    if profile:
-        st.markdown('#### Profile output')
-        a,b,c=st.columns(3)
-        a.metric('Songs',profile.get('song_count',0))
-        b.metric('Avg BPM',profile.get('average_bpm') or '—')
-        c.metric('Avg danceability',profile.get('average_danceability') or '—')
-        st.markdown('##### Core tags')
-        tag_rows=[
-            {'category':'Core genres','values':'; '.join(profile.get('core_genre_tags',[]))},
-            {'category':'Core moods','values':'; '.join(profile.get('core_mood_tags',[]))},
-            {'category':'Reference artists','values':'; '.join(profile.get('strongest_reference_artists',[]))},
-            {'category':'Recurring audio traits','values':'; '.join(profile.get('recurring_audio_traits',[]))},
-        ]
-        st.dataframe(pd.DataFrame(tag_rows),use_container_width=True,hide_index=True)
-        st.markdown('##### Playlist search phrases')
-        st.dataframe(pd.DataFrame({'search_phrase':profile.get('playlist_search_phrases',[])}),use_container_width=True,hide_index=True)
-        targets=profile.get('chartmetric_mining_targets') or {}
-        st.markdown('##### Recommended Chartmetric mining targets')
-        st.json(targets,expanded=False)
-        st.markdown('##### Chartmetric mining')
-        m1,m2=st.columns(2)
-        with m1:
-            cm_query_count=st.number_input('Max Chartmetric queries',min_value=1,max_value=50,value=12,step=1)
-        with m2:
-            cm_limit=st.number_input('Results per query',min_value=1,max_value=100,value=25,step=1)
-        if st.button('Plan / Run Chartmetric Mining',use_container_width=True,disabled=not profile):
-            result=run_chartmetric_mining(profile,limit_per_query=int(cm_limit),max_queries=int(cm_query_count))
-            st.session_state.chartmetric_mining_result=result
-            if result.get('dry_run'):
-                st.info(result.get('message'))
-            elif result.get('ok'):
-                st.success(result.get('message'))
-            else:
-                st.error(result.get('message') or 'Chartmetric mining failed.')
-        mining_result=st.session_state.chartmetric_mining_result
-        if mining_result:
-            st.json({k:v for k,v in mining_result.items() if k!='playlists'},expanded=False)
-            if mining_result.get('playlists'):
-                mined_df=pd.DataFrame(mining_result.get('playlists',[]))
-                cols=[c for c in ['playlist_name','curator_name','follower_count','search_query','playlist_url','last_updated'] if c in mined_df.columns]
-                st.dataframe(mined_df[cols],use_container_width=True,hide_index=True)
-        jobs=get_mining_jobs()
-        if jobs:
-            st.markdown('##### Mining jobs')
-            st.dataframe(pd.DataFrame(jobs)[[c for c in ['id','profile_name','source','status','query_count','result_count','error','created_at'] if c in pd.DataFrame(jobs).columns]],use_container_width=True,hide_index=True)
-        mined=get_mined_playlists()
-        if mined:
-            st.markdown('##### Mined playlists')
-            mined_df=pd.DataFrame(mined)
-            cols=[c for c in ['playlist_name','curator_name','follower_count','query','playlist_url','status','created_at'] if c in mined_df.columns]
-            st.dataframe(mined_df[cols],use_container_width=True,hide_index=True)
-    else:
-        st.caption('No saved Artist Sound Profile yet.')
 with tab_release:
     st.subheader('Release Prep Library')
     st.caption('Prepare unreleased songs before scheduling: profile the audio, plan Chartmetric mining, and draft campaign briefs.')
