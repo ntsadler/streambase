@@ -187,7 +187,7 @@ def catalog_tag_summary(catalog_rows):
             counts[key]['song_count']+=1
     return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_pitch,tab_catalog,tab_release,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Pitch Setup','Catalog','Release Prep Library','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
+tab_scan,tab_catalog,tab_release,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Release Prep Library','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -420,16 +420,6 @@ with tab_scan:
             else:
                 st.warning(home_analysis.get('error') or f"Cyanite status: {home_analysis.get('status','unknown')}")
                 st.json({k:v for k,v in home_analysis.items() if k!='raw'},expanded=False)
-with tab_pitch:
-    st.subheader('Pitch Setup')
-    st.caption('The first-page release switch controls whether this campaign is a new release or an already released song.')
-    if st.session_state.pitch_release_type=='new_release':
-        st.info('New release mode: upload the WAV on the first page. Streambase will allow new-release playlists and will not require a Spotify URL in outreach drafts yet.')
-        st.session_state.pitch_spotify_meta={}
-    else:
-        st.info('Already released mode: use the Spotify URL field on the first page. Streambase will use release age to avoid new-release-only playlists when needed, and the Spotify URL will be included in outreach drafts.')
-        if st.session_state.pitch_spotify_meta:
-            st.json(st.session_state.pitch_spotify_meta,expanded=False)
 with tab_catalog:
     st.subheader('Catalog')
     st.caption('Uploaded songs, playlist placements, and Cyanite genre tags.')
