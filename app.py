@@ -187,7 +187,7 @@ def catalog_tag_summary(catalog_rows):
             counts[key]['song_count']+=1
     return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_catalog,tab_release,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Release Prep Library','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
+tab_scan,tab_catalog,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -506,95 +506,6 @@ with tab_catalog:
     else:
         st.info('No uploaded songs yet. Songs appear here after they are uploaded from Scan A Song or Release Prep.')
     st.caption(f"Audio folder: data/audio_uploads · Song profile backup: data/song_profiles.json")
-with tab_release:
-    st.subheader('Release Prep Library')
-    st.caption('Prepare unreleased songs before scheduling: profile the audio, plan Chartmetric mining, and draft campaign briefs.')
-    release_uploads=st.file_uploader('Upload unreleased songs',type=['wav','mp3'],accept_multiple_files=True,key='release_prep_uploads')
-    if release_uploads and st.button('Add to Release Prep Library',use_container_width=True):
-        rows=[]; errors=[]
-        for up in release_uploads:
-            result=save_release_prep_upload(up)
-            if result.get('ok'): rows.append(result)
-            else: errors.append(result.get('error','Upload failed.'))
-        if rows:
-            bulk_upsert_release_songs(rows); st.success(f"Added {len(rows)} unreleased song(s).")
-        for err in errors: st.error(err)
-    release_rows=get_release_songs()
-    if release_rows:
-        st.markdown('#### Filters')
-        f1,f2,f3,f4=st.columns(4)
-        with f1:
-            status_filter=st.selectbox('Release status',['all']+RELEASE_STATUSES)
-        with f2:
-            campaign_filter=st.selectbox('Campaign readiness',['all']+CAMPAIGN_STATUSES)
-        with f3:
-            genre_filter=st.text_input('Genre contains')
-        with f4:
-            ref_filter=st.text_input('Reference artist contains')
-        filtered=[]
-        for row in release_rows:
-            if status_filter!='all' and row.get('release_status')!=status_filter: continue
-            if campaign_filter!='all' and row.get('campaign_status')!=campaign_filter: continue
-            if genre_filter and genre_filter.lower() not in str(row.get('genre_tags','')).lower(): continue
-            if ref_filter and ref_filter.lower() not in str(row.get('reference_artists','')).lower(): continue
-            filtered.append(row)
-        if not filtered:
-            st.info('No release prep songs match those filters.')
-        columns=['id','title','file_path','release_status','planned_release_date','campaign_status','bpm','key','genre_tags','mood_tags','energy','danceability','instrumentation','vocal_style','lyrical_theme_notes','reference_artists','recommended_playlist_categories','recommended_chartmetric_targets','analysis_source','notes']
-        df=pd.DataFrame(filtered)
-        for col in columns:
-            if col not in df.columns: df[col]=''
-        st.markdown('#### Unreleased song records')
-        st.caption('Manual override is expected for now. Use semicolons for multi-value fields.')
-        edited=st.data_editor(
-            df[columns],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'release_status':st.column_config.SelectboxColumn('release_status',options=RELEASE_STATUSES),
-                'campaign_status':st.column_config.SelectboxColumn('campaign_status',options=CAMPAIGN_STATUSES),
-                'planned_release_date':st.column_config.TextColumn('planned_release_date',help='YYYY-MM-DD when known'),
-            },
-        )
-        cprep1,cprep2,cprep3=st.columns(3)
-        with cprep1:
-            if st.button('Save Release Prep Edits',use_container_width=True):
-                rows=edited.fillna('').to_dict(orient='records')
-                for row in rows:
-                    if not row.get('recommended_playlist_categories'):
-                        row['recommended_playlist_categories']='; '.join(infer_playlist_categories(row))
-                    row['campaign_status']=campaign_readiness(row)
-                bulk_upsert_release_songs(rows); st.success('Release prep records saved.')
-        with cprep2:
-            if st.button('Generate Mining Targets Per Song',use_container_width=True):
-                rows=edited.fillna('').to_dict(orient='records')
-                for row in rows:
-                    brief=build_campaign_brief(row)
-                    row['recommended_playlist_categories']='; '.join(brief.get('best_playlist_keywords',[]))
-                    row['recommended_chartmetric_targets']='; '.join(brief.get('best_chartmetric_mining_queries',[])[:12])
-                    row['campaign_status']='mining_ready'
-                bulk_upsert_release_songs(rows); st.success('Per-song mining targets generated.')
-        with cprep3:
-            selected_title=st.selectbox('Campaign brief song',[r.get('title','Untitled') for r in filtered] or [''])
-            if st.button('Generate Campaign Brief',type='primary',use_container_width=True,disabled=not filtered):
-                row=next((r for r in edited.fillna('').to_dict(orient='records') if r.get('title')==selected_title),{})
-                if row:
-                    brief=build_campaign_brief(row)
-                    save_release_campaign_brief(row.get('id'),brief,'campaign_draft')
-                    st.session_state.release_campaign_brief=brief
-                    st.success('Campaign brief saved.')
-        brief=st.session_state.release_campaign_brief
-        campaigns=get_release_campaigns()
-        if not brief and campaigns:
-            brief=campaigns[0].get('campaign_brief',{})
-        if brief:
-            st.markdown('#### Campaign brief')
-            st.json(brief,expanded=False)
-        if campaigns:
-            st.markdown('#### Saved release campaign briefs')
-            st.dataframe(pd.DataFrame([{'song_title':c.get('song_title',''),'status':c.get('status',''),'updated_at':c.get('updated_at','')} for c in campaigns]),use_container_width=True,hide_index=True)
-    else:
-        st.info('Upload unreleased WAV/MP3 files to start preparing release campaigns.')
 with tab_import:
     st.subheader('Import playlist data')
     mode=st.radio('Choose input method',['Paste Spotify playlist links','Upload CSV'],horizontal=True)
