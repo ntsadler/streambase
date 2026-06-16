@@ -1,20 +1,21 @@
-import json, time, pandas as pd, streamlit as st
-import re
-from src.audio_analysis import cyanite_ready_note,save_uploaded_song_file
+import importlib, json, time, pandas as pd, streamlit as st
+from src.audio_analysis import save_uploaded_song_file
 from src.chartmetric import chartmetric_status
 from src.chartmetric_mining import run_chartmetric_mining
-from src.cyanite import cyanite_status,fetch_cyanite_analysis,normalize_cyanite_tags,upload_song_audio_to_cyanite
-from src.database import init_db,get_curator_profiles,get_all_playlists,add_outreach_event,update_playlist_status,get_email_queue,update_email_queue_status,save_song_fit_targets,get_song_fit_targets,bulk_upsert_artist_songs,get_artist_songs,save_artist_sound_profile,get_artist_sound_profile,bulk_upsert_release_songs,get_release_songs,save_release_campaign_brief,get_release_campaigns,backup_song_profiles_json,bulk_upsert_artist_references,get_artist_references,get_mining_jobs,get_mined_playlists
+from src.cyanite import cyanite_status,fetch_cyanite_analysis,upload_song_audio_to_cyanite
+from src.database import init_db,get_curator_profiles,get_all_playlists,add_outreach_event,update_playlist_status,get_email_queue,update_email_queue_status,get_song_fit_targets,bulk_upsert_artist_songs,get_artist_songs,save_artist_sound_profile,get_artist_sound_profile,bulk_upsert_release_songs,get_release_songs,save_release_campaign_brief,get_release_campaigns,backup_song_profiles_json,bulk_upsert_artist_references,get_artist_references,get_mining_jobs,get_mined_playlists
 from src.ingest_playlists import load_playlists_from_text,playlists_from_links,save_raw_json
 from src.pipeline import process_playlists
-from src.release_prep import CAMPAIGN_STATUSES,RELEASE_STATUSES,build_campaign_brief,campaign_readiness,infer_playlist_categories,save_release_prep_upload
 from src.settings import DB_PATH,LOCAL_DATA_DIR
-from src.sound_profile import build_artist_sound_profile
-from src.song_analyzer import analyze_song_fit,score_spotify_playlist_candidates,suggest_reference_song_searches
-from src.spotify_api import ENGLISH_SPOTIFY_MARKETS,SpotifyAPI,fetch_spotify_track,fetch_spotify_tracks_result,search_spotify_playlists,search_spotify_playlists_multi_market,search_spotify_tracks
+from src.song_analyzer import analyze_song_fit,score_spotify_playlist_candidates
+import src.playlist_discovery as playlist_discovery
+from src.spotify_api import ENGLISH_SPOTIFY_MARKETS,SpotifyAPI,fetch_spotify_track,search_spotify_playlists_multi_market
 from src.web_enricher import enrich_playlist_from_url,enrich_track_from_url
-st.set_page_config(page_title='Streambase',page_icon='🎛️',layout='wide')
-st.title('🎛️ Streambase')
+playlist_discovery=importlib.reload(playlist_discovery)
+discover_catalog_song_playlists=playlist_discovery.discover_catalog_song_playlists
+discover_released_track_playlists=playlist_discovery.discover_released_track_playlists
+st.set_page_config(page_title='streambase',page_icon='🎛️',layout='wide')
+st.title('🎛️ streambase')
 st.caption('Playlist intelligence, curator contact stack, and outreach CRM for independent music growth.')
 st.markdown(
     """
@@ -108,7 +109,7 @@ init_db()
 with st.sidebar:
     spotify=SpotifyAPI(); cm=chartmetric_status(); cy=cyanite_status()
     st.header('Settings'); do_web=st.toggle('Fetch public contact info',value=True); do_spotify=st.toggle('Use Spotify API connector',value=spotify.configured,disabled=not spotify.configured); queue_email=st.toggle('Queue emails for approval',value=True)
-    playlist_cooldown_days=st.number_input('Playlist pitch cooldown days',min_value=0,max_value=180,value=30,step=1,help='Prevents Streambase from queueing another song to the same playlist too soon.')
+    playlist_cooldown_days=st.number_input('Playlist pitch cooldown days',min_value=0,max_value=180,value=30,step=1,help='Prevents streambase from queueing another song to the same playlist too soon.')
     minimum_queue_score=st.number_input('Minimum score to queue email',min_value=0,max_value=100,value=50,step=1,help='Lower-scoring playlists can still be saved, but they will not enter email approval automatically.')
     st.markdown('#### Connector status')
     st.write(f"Spotify API: {'connected' if spotify.configured else 'not connected'}")
@@ -136,7 +137,10 @@ if 'home_cyanite_upload_result' not in st.session_state: st.session_state.home_c
 if 'home_cyanite_analysis_result' not in st.session_state: st.session_state.home_cyanite_analysis_result={}
 if 'home_saved_song_path' not in st.session_state: st.session_state.home_saved_song_path=''
 if 'home_song_fit' not in st.session_state: st.session_state.home_song_fit=None
+if 'home_playlist_searches' not in st.session_state: st.session_state.home_playlist_searches=[]
 if 'home_spotify_playlist_candidates' not in st.session_state: st.session_state.home_spotify_playlist_candidates=[]
+if 'batch_playlist_candidates' not in st.session_state: st.session_state.batch_playlist_candidates=[]
+if 'batch_playlist_log' not in st.session_state: st.session_state.batch_playlist_log=[]
 if 'pitch_release_type' not in st.session_state: st.session_state.pitch_release_type='new_release'
 if 'pitch_spotify_url' not in st.session_state: st.session_state.pitch_spotify_url=''
 if 'pitch_spotify_meta' not in st.session_state: st.session_state.pitch_spotify_meta={}
@@ -144,10 +148,20 @@ def df_session():
     df=pd.DataFrame(st.session_state.playlists) if st.session_state.playlists else pd.DataFrame(columns=['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description'])
     for col in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description']:
         if col not in df.columns: df[col]=0 if col=='follower_count' else ''
-    return df
+    return df[['playlist_name','playlist_url','follower_count','curator_name','related_artists','last_updated','spotify_description']]
+def merge_playlist_editor_rows(original_rows, edited_rows):
+    merged=[]
+    for idx,edited in enumerate(edited_rows):
+        base=dict(original_rows[idx]) if idx<len(original_rows) else {}
+        base.update(edited)
+        merged.append(base)
+    return merged
 def catalog_playlist_summary(catalog_rows, targets):
     def clean(value):
         return str(value or '').strip().lower()
+    def primary_genre(song):
+        tags=[tag.strip() for tag in str(song.get('genre_tags') or '').split(';') if tag.strip()]
+        return tags[0] if tags else ''
     targets_by_song={}
     for target in targets:
         title_key=clean(target.get('song_title'))
@@ -170,6 +184,7 @@ def catalog_playlist_summary(catalog_rows, targets):
             'id':int(song.get('id') or 0),
             'title':title,
             'file_name':song.get('file_name') or '',
+            'primary_genre':primary_genre(song),
             'release_status':song.get('release_status') or '',
             'playlists_added':len(playlist_rows),
             'last_updated':song.get('updated_at') or song.get('created_at') or '',
@@ -187,7 +202,7 @@ def catalog_tag_summary(catalog_rows):
             counts[key]['song_count']+=1
     return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_catalog,tab_song,tab_playlists,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Song Fit','Playlists','Curator CRM','Email Queue'])
+tab_scan,tab_catalog,tab_playlists,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Playlists','Curator CRM','Email Queue'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -207,6 +222,7 @@ with tab_scan:
         if next_release_type!=st.session_state.pitch_release_type:
             st.session_state.pitch_release_type=next_release_type
             st.session_state.home_song_fit=None
+            st.session_state.home_playlist_searches=[]
             st.session_state.home_spotify_playlist_candidates=[]
             if next_release_type=='new_release':
                 st.session_state.pitch_spotify_url=''
@@ -237,9 +253,36 @@ with tab_scan:
                         if meta:
                             meta['release_context']='already_released'
                             st.session_state.pitch_spotify_meta=meta
-                            st.session_state.home_song_fit=None
-                            st.session_state.home_spotify_playlist_candidates=[]
-                            st.success(f"Loaded Spotify metadata for {meta.get('title') or 'track'}.")
+                            saved_playlists=get_all_playlists()
+                            if spotify.configured:
+                                discovery=discover_released_track_playlists(
+                                    meta,
+                                    saved_playlists=saved_playlists,
+                                    query_limit=4,
+                                    limit_per_query=5,
+                                    markets=ENGLISH_SPOTIFY_MARKETS,
+                                )
+                                st.session_state.home_song_fit=discovery.get('song_fit')
+                                st.session_state.home_playlist_searches=discovery.get('searches',[])
+                                st.session_state.home_spotify_playlist_candidates=discovery.get('candidates',[])
+                                if discovery.get('error'):
+                                    st.warning(discovery.get('error'))
+                                st.success(f"Loaded Spotify metadata and scored {len(st.session_state.home_spotify_playlist_candidates)} playlist candidate(s).")
+                            else:
+                                st.session_state.home_song_fit=analyze_song_fit(
+                                    None,
+                                    title=meta.get('title',''),
+                                    artist=meta.get('artist',''),
+                                    reference_artists=meta.get('reference_artists',''),
+                                    descriptors=meta.get('descriptors',''),
+                                    saved_playlists=saved_playlists,
+                                    spotify_track=meta,
+                                    reference_tracks=[],
+                                    cyanite_profile={},
+                                )
+                                st.session_state.home_playlist_searches=(st.session_state.home_song_fit or {}).get('discovery_searches',[])
+                                st.session_state.home_spotify_playlist_candidates=[]
+                                st.success(f"Loaded Spotify metadata for {meta.get('title') or 'track'}.")
                         else:
                             st.error('Could not load Spotify metadata for that link.')
             pitch_meta=st.session_state.pitch_spotify_meta or {}
@@ -261,6 +304,7 @@ with tab_scan:
             st.session_state.home_cyanite_upload_result={}
             st.session_state.home_cyanite_analysis_result={}
             st.session_state.home_song_fit=None
+            st.session_state.home_playlist_searches=[]
             st.session_state.home_spotify_playlist_candidates=[]
             with st.status('Uploading audio to Cyanite...',expanded=True) as status:
                 upload_result=upload_song_audio_to_cyanite(home_audio,home_title,'')
@@ -287,6 +331,8 @@ with tab_scan:
                         if saved.get('ok'):
                             row={
                                 'title':analysis.get('title') or saved.get('title',''),
+                                'artist_name':pitch_meta.get('artist',''),
+                                'spotify_url':pitch_track_url if pitch_is_released else '',
                                 'file_name':saved.get('file_name',''),
                                 'file_path':saved.get('file_path',''),
                                 'release_status':'released' if pitch_is_released else 'unreleased',
@@ -318,9 +364,10 @@ with tab_scan:
                             reference_tracks=[],
                             cyanite_profile=analysis,
                         )
+                        st.session_state.home_playlist_searches=(st.session_state.home_song_fit or {}).get('discovery_searches',[])
                     else:
                         status.update(label='Cyanite analysis is not complete yet.',state='error')
-                        st.info(analysis.get('error') or 'Cyanite is still processing. Try scanning again or fetch later from Song Fit.')
+                        st.info(analysis.get('error') or 'Cyanite is still processing. Try scanning again from Scan A Song.')
         home_analysis=st.session_state.home_cyanite_analysis_result
         if home_analysis:
             st.markdown('#### Cyanite Mood Board')
@@ -357,11 +404,12 @@ with tab_scan:
                         reference_tracks=[],
                         cyanite_profile=home_analysis,
                     )
+                    st.session_state.home_playlist_searches=(st.session_state.home_song_fit or {}).get('discovery_searches',[])
                 home_fit=st.session_state.home_song_fit or {}
-                searches=home_fit.get('discovery_searches') or []
+                searches=st.session_state.home_playlist_searches or home_fit.get('discovery_searches') or []
                 if searches:
                     st.markdown('#### Spotify Playlist Search')
-                    st.caption('Search breadth is controlled here. Streambase runs a limited number of Song DNA keyword searches, asks Spotify for a limited number of results per search, removes duplicates, then scores candidates.')
+                    st.caption('Search breadth is controlled here. streambase runs a limited number of Song DNA keyword searches, asks Spotify for a limited number of results per search, removes duplicates, then scores candidates.')
                     search_df=pd.DataFrame(searches)
                     st.dataframe(search_df,use_container_width=True,hide_index=True)
                     hs1,hs2,hs3=st.columns(3)
@@ -372,7 +420,7 @@ with tab_scan:
                     with hs3:
                         home_markets=st.multiselect('Spotify markets',options=ENGLISH_SPOTIFY_MARKETS+['ZA','SG','PH'],default=ENGLISH_SPOTIFY_MARKETS,key='home_markets')
                     estimated_max=int(home_query_limit)*int(home_per_query)*max(1,len(home_markets))
-                    st.caption(f"Maximum raw Spotify results this run: {estimated_max}. Streambase dedupes across markets, so final candidates may be lower.")
+                    st.caption(f"Maximum raw Spotify results this run: {estimated_max}. streambase dedupes across markets, so final candidates may be lower.")
                     if st.button('Find Spotify Playlists From This Song DNA',use_container_width=True,disabled=not spotify.configured):
                         selected_queries=[s.get('search_query','') for s in searches[:int(home_query_limit)] if s.get('search_query')]
                         result=search_spotify_playlists_multi_market(selected_queries,int(home_per_query),home_markets or ENGLISH_SPOTIFY_MARKETS)
@@ -420,6 +468,78 @@ with tab_scan:
             else:
                 st.warning(home_analysis.get('error') or f"Cyanite status: {home_analysis.get('status','unknown')}")
                 st.json({k:v for k,v in home_analysis.items() if k!='raw'},expanded=False)
+        if not home_analysis and st.session_state.home_song_fit:
+            home_fit=st.session_state.home_song_fit or {}
+            searches=st.session_state.home_playlist_searches or home_fit.get('discovery_searches') or []
+            if searches:
+                st.markdown('#### Spotify Playlist Search')
+                st.caption('streambase used the released Spotify link to build similar-artist and Song DNA searches, then scored playlist matches automatically.')
+                st.dataframe(pd.DataFrame(searches),use_container_width=True,hide_index=True)
+                hs1,hs2,hs3=st.columns(3)
+                with hs1:
+                    home_query_limit=st.number_input('Spotify searches to run',min_value=1,max_value=len(searches),value=min(3,len(searches)),step=1,key='home_query_limit')
+                with hs2:
+                    home_per_query=st.number_input('Spotify results per search',min_value=1,max_value=10,value=5,step=1,key='home_per_query')
+                with hs3:
+                    home_markets=st.multiselect('Spotify markets',options=ENGLISH_SPOTIFY_MARKETS+['ZA','SG','PH'],default=ENGLISH_SPOTIFY_MARKETS,key='home_markets')
+                if st.button('Refresh Spotify Playlist Matches',use_container_width=True,disabled=not spotify.configured):
+                    if pitch_is_released and pitch_meta:
+                        discovery=discover_released_track_playlists(
+                            pitch_meta,
+                            saved_playlists=get_all_playlists(),
+                            query_limit=int(home_query_limit),
+                            limit_per_query=int(home_per_query),
+                            markets=home_markets or ENGLISH_SPOTIFY_MARKETS,
+                        )
+                        if discovery.get('error'):
+                            st.error(discovery.get('error') or 'Spotify playlist search failed.')
+                        st.session_state.home_song_fit=discovery.get('song_fit') or st.session_state.home_song_fit
+                        st.session_state.home_playlist_searches=discovery.get('searches',[])
+                        candidates=discovery.get('candidates',[])
+                    else:
+                        selected_queries=[s.get('search_query','') for s in searches[:int(home_query_limit)] if s.get('search_query')]
+                        result=search_spotify_playlists_multi_market(selected_queries,int(home_per_query),home_markets or ENGLISH_SPOTIFY_MARKETS)
+                        if not result.get('ok'):
+                            st.error(result.get('error') or 'Spotify playlist search failed.')
+                        candidates=score_spotify_playlist_candidates(home_fit,result.get('playlists',[]),get_all_playlists())
+                    st.session_state.home_spotify_playlist_candidates=candidates
+                    st.success(f"Found {len(candidates)} scored playlist candidate(s).")
+                if not spotify.configured:
+                    st.info('Connect Spotify API credentials to search Spotify playlists.')
+            home_candidates=st.session_state.home_spotify_playlist_candidates or []
+            if home_candidates:
+                st.markdown('#### Playlist Candidates')
+                cand_df=pd.DataFrame(home_candidates)
+                cols=[c for c in ['candidate_fit_score','already_in_crm','playlist_name','curator_name','follower_count','search_query','matched_lanes','matched_descriptors','related_artists','playlist_url'] if c in cand_df.columns]
+                st.dataframe(cand_df[cols],use_container_width=True,hide_index=True)
+                fresh=[c for c in home_candidates if not c.get('already_in_crm')]
+                sc1,sc2=st.columns(2)
+                with sc1:
+                    if st.button('Stage Candidates in Import Queue',use_container_width=True,key='home_stage_candidates'):
+                        st.session_state.playlists=[
+                            {k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']}
+                            for c in fresh
+                        ]
+                        st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Playlists.")
+                with sc2:
+                    if st.button('Analyze & Save Candidates to CRM',use_container_width=True,key='home_save_candidates'):
+                        song_context={
+                            'title':(st.session_state.home_song_fit or {}).get('song',{}).get('title') or pitch_meta.get('title',''),
+                            'artist':(st.session_state.home_song_fit or {}).get('song',{}).get('artist') or pitch_meta.get('artist',''),
+                            'spotify_url':pitch_track_url if pitch_is_released else '',
+                            'release_status':'released' if pitch_is_released else 'unreleased',
+                            'release_age_label':((st.session_state.home_song_fit or {}).get('release_guidance') or {}).get('release_age_label',''),
+                        }
+                        rows=[
+                            {**{k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']},'song_context':song_context}
+                            for c in fresh
+                        ]
+                        if rows:
+                            save_raw_json(rows)
+                            st.session_state.report=process_playlists(rows,do_web_enrichment=do_web,do_spotify_api=False,queue_email_approval=queue_email,song_context=song_context,playlist_cooldown_days=int(playlist_cooldown_days),minimum_queue_score=int(minimum_queue_score))
+                            st.success(f"Analyzed and saved {len(rows)} playlist candidate(s).")
+                        else:
+                            st.info('No new candidates to save.')
 with tab_catalog:
     st.subheader('Catalog')
     st.caption('Uploaded songs, playlist placements, and Cyanite genre tags.')
@@ -431,24 +551,10 @@ with tab_catalog:
         cm1,cm2=st.columns(2)
         cm1.metric('Uploaded Songs',len(catalog_display_rows))
         cm2.metric('Playlist Adds',total_playlist_adds)
-        all_genres=catalog_tag_summary(catalog_rows)
-        st.markdown('#### All Catalog Genres')
-        if all_genres:
-            st.dataframe(
-                pd.DataFrame(all_genres),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    'tag':st.column_config.TextColumn('Genre'),
-                    'song_count':st.column_config.NumberColumn('Songs',format='%d'),
-                },
-            )
-        else:
-            st.info('No Cyanite genre tags are saved across the catalog yet.')
         st.markdown('#### Uploaded Catalog')
         st.caption('Click a song row to see every playlist saved for it.')
         catalog_df=pd.DataFrame(catalog_display_rows)
-        catalog_view=catalog_df[['title','file_name','release_status','playlists_added','last_updated']]
+        catalog_view=catalog_df[['title','primary_genre','release_status','playlists_added','last_updated']]
         selected_catalog=st.dataframe(
             catalog_view,
             use_container_width=True,
@@ -457,12 +563,26 @@ with tab_catalog:
             selection_mode='single-row',
             column_config={
                 'title':st.column_config.TextColumn('Song'),
-                'file_name':st.column_config.TextColumn('File'),
+                'primary_genre':st.column_config.TextColumn('Genre'),
                 'release_status':st.column_config.TextColumn('Release'),
                 'playlists_added':st.column_config.NumberColumn('Playlists',format='%d'),
                 'last_updated':st.column_config.TextColumn('Last Updated'),
             },
         )
+        with st.expander('View full catalog genre list',expanded=False):
+            all_genres=catalog_tag_summary(catalog_rows)
+            if all_genres:
+                st.dataframe(
+                    pd.DataFrame(all_genres),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        'tag':st.column_config.TextColumn('Genre'),
+                        'song_count':st.column_config.NumberColumn('Songs',format='%d'),
+                    },
+                )
+            else:
+                st.info('No Cyanite genre tags are saved across the catalog yet.')
         selected_rows=(selected_catalog.selection.rows if selected_catalog and selected_catalog.selection else [])
         if selected_rows:
             selected_row=catalog_df.iloc[selected_rows[0]].to_dict()
@@ -506,229 +626,104 @@ with tab_catalog:
     else:
         st.info('No uploaded songs yet. Songs appear here after they are uploaded from Scan A Song or Release Prep.')
     st.caption(f"Audio folder: data/audio_uploads · Song profile backup: data/song_profiles.json")
-with tab_song:
-    st.subheader('Song playlist fit')
-    st.caption('Use audio for sound analysis and a Spotify link for release age, title/artist metadata, and the curator-facing pitch URL.')
-    song_link=st.text_input('Spotify song link',placeholder='https://open.spotify.com/track/...')
-    c0a,c0b=st.columns(2)
-    with c0a:
-        if st.button('Fetch Spotify Song Metadata',use_container_width=True):
-            if not song_link: st.error('Paste a Spotify track link first.')
-            else:
-                meta=fetch_spotify_track(song_link) if spotify.configured else {}
-                if not meta: meta=enrich_track_from_url(song_link)
-                st.session_state.song_spotify=meta
-                if meta: st.success(f"Loaded metadata for {meta.get('title') or 'Spotify track'}.")
-                else: st.warning('No Spotify metadata found. Add title, artist, references, and descriptors manually.')
-    with c0b:
-        if st.button('Clear Song Metadata',use_container_width=True):
-            st.session_state.song_spotify={}; st.session_state.reference_spotify_tracks=[]; st.session_state.generated_reference_tracks=[]; st.session_state.cyanite_upload_result={}; st.session_state.song_fit=None; st.rerun()
-    reference_links=st.text_area('Reference song links',height=110,placeholder='Optional: paste 3-5 Spotify track links, one per line, that sound like your song.')
-    if st.button('Fetch Reference Song Metadata',use_container_width=True):
-        refs=[part.strip() for part in re.split(r'[\s,]+',reference_links) if part.strip()]
-        if not refs: st.error('Paste at least one Spotify reference track link first.')
-        elif not spotify.configured: st.error('Spotify API credentials are required for reference song metadata.')
-        else:
-            result=fetch_spotify_tracks_result(refs)
-            st.session_state.reference_spotify_tracks=result.get('tracks',[])
-            if st.session_state.reference_spotify_tracks:
-                st.success(f"Loaded {len(st.session_state.reference_spotify_tracks)} reference song(s).")
-            else:
-                st.error(result.get('error') or 'No reference song metadata loaded.')
-            if result.get('failed'):
-                st.caption('Some reference links could not be loaded.')
-                st.json(result.get('failed'),expanded=False)
-    st.markdown('#### Song audio')
-    song_file=st.file_uploader('Upload WAV or MP3 for Cyanite analysis',type=['wav','mp3'])
-    spotify_meta=st.session_state.song_spotify or {}
-    if spotify_meta:
-        st.markdown('#### Spotify metadata')
-        st.json(spotify_meta,expanded=False)
-    reference_meta=st.session_state.reference_spotify_tracks or []
-    if reference_meta:
-        st.markdown('#### Reference song metadata')
-        st.dataframe(pd.DataFrame(reference_meta)[[c for c in ['title','artist','descriptors','popularity','release_date','spotify_url'] if c in pd.DataFrame(reference_meta).columns]],use_container_width=True,hide_index=True)
-    c1,c2=st.columns(2)
-    with c1:
-        song_title=st.text_input('Song title',value=spotify_meta.get('title',''))
-        song_artist=st.text_input('Artist name',value=spotify_meta.get('artist',''))
-    with c2:
-        song_refs=st.text_input('Reference artists',value=spotify_meta.get('reference_artists',''),placeholder='MGMT; LCD Soundsystem; Tame Impala')
-        song_desc=st.text_input('Descriptors',value=spotify_meta.get('descriptors',''),placeholder='indie dance; synth; upbeat; late night')
-    st.markdown('#### Audio intelligence')
-    if song_file:
-        ccy1,ccy2=st.columns([1,1])
-        with ccy1:
-            if st.button('Prepare/Send Audio to Cyanite',use_container_width=True):
-                title_for_cyanite=(spotify_meta.get('title') or song_title if 'song_title' in locals() else spotify_meta.get('title',''))
-                external_id=spotify_meta.get('spotify_track_id') or song_link.strip()
-                result=upload_song_audio_to_cyanite(song_file,title_for_cyanite,external_id)
-                st.session_state.cyanite_upload_result=result
-        with ccy2:
-            st.caption('WAV files are converted to MP3 before Cyanite upload. Spotify link stays attached for release age and outreach.')
-    if st.session_state.cyanite_upload_result:
-        result=st.session_state.cyanite_upload_result
-        if result.get('ok'):
-            st.success(f"Cyanite library track created: {result.get('library_track_id') or 'created'}")
-            if st.button('Fetch Cyanite Analysis',use_container_width=True):
-                st.session_state.cyanite_analysis_result=fetch_cyanite_analysis(result.get('library_track_id',''))
-        elif result.get('prepared'):
-            st.warning(result.get('error'))
-        else:
-            st.error(result.get('error') or 'Cyanite audio preparation failed.')
-        st.json({k:v for k,v in result.items() if k not in {'raw'}},expanded=False)
-    if st.session_state.cyanite_analysis_result:
-        analysis=st.session_state.cyanite_analysis_result
-        if analysis.get('ok'):
-            st.success('Cyanite analysis loaded into Song Fit.')
-        else:
-            st.info(analysis.get('error') or f"Cyanite status: {analysis.get('status','unknown')}")
-        st.json({k:v for k,v in analysis.items() if k not in {'raw'}},expanded=False)
-    cyanite_raw=st.text_area('Cyanite tags JSON',height=100,placeholder='Optional: paste Cyanite genre/mood/tag JSON here when available.')
-    cyanite_profile=st.session_state.cyanite_analysis_result if st.session_state.cyanite_analysis_result.get('ok') else {}
-    if cyanite_raw.strip():
-        try:
-            cyanite_profile=normalize_cyanite_tags(json.loads(cyanite_raw))
-            st.success('Cyanite tags parsed.')
-        except json.JSONDecodeError:
-            st.error('Cyanite tags must be valid JSON.')
-    cauto1,cauto2=st.columns([1,1])
-    with cauto1:
-        auto_limit=st.number_input('Generated reference songs per search',min_value=1,max_value=5,value=2,step=1)
-    with cauto2:
-        auto_market=st.text_input('Reference song market',value='US',max_chars=2)
-    if st.button('Generate Reference Songs',use_container_width=True,disabled=not spotify.configured):
-        seed_song={'artist':song_artist,'reference_artists':song_refs}
-        seed_queries=suggest_reference_song_searches(seed_song,song_desc,cyanite_profile)
-        if not seed_queries: st.error('Add descriptors, reference artists, or Cyanite tags before generating reference songs.')
-        else:
-            result=search_spotify_tracks([q.get('search_query','') for q in seed_queries],int(auto_limit),auto_market.upper() or 'US')
-            tracks=result.get('tracks',[])
-            own_ids={spotify_meta.get('spotify_track_id',''),song_link.strip()}
-            tracks=[t for t in tracks if t.get('spotify_track_id') not in own_ids and t.get('spotify_url') not in own_ids]
-            st.session_state.generated_reference_tracks=tracks
-            if result.get('ok') and tracks: st.success(f"Generated {len(tracks)} reference song candidate(s).")
-            else: st.error(result.get('error') or 'No generated reference songs found.')
-    generated_refs=st.session_state.generated_reference_tracks or []
-    if generated_refs:
-        st.markdown('#### Generated reference songs')
-        gdf=pd.DataFrame(generated_refs)
-        st.dataframe(gdf[[c for c in ['title','artist','search_query','popularity','release_date','spotify_url'] if c in gdf.columns]],use_container_width=True,hide_index=True)
-    combined_reference_meta=[]
-    seen_ref_urls=set()
-    for item in (reference_meta or []) + (generated_refs or []):
-        url=item.get('spotify_url') or item.get('spotify_track_id')
-        if url and url in seen_ref_urls: continue
-        if url: seen_ref_urls.add(url)
-        combined_reference_meta.append(item)
-    if st.button('Analyze Song Fit',type='primary',use_container_width=True):
-        if not song_file and not spotify_meta and not (song_title or song_artist or song_refs or song_desc): st.error('Upload a song, paste a Spotify track link, or add song details first.')
-        else:
-            st.session_state.song_fit=analyze_song_fit(song_file,song_title,song_artist,song_refs,song_desc,get_all_playlists(),spotify_meta,combined_reference_meta,cyanite_profile)
-    fit=st.session_state.song_fit
-    if fit:
-        summary=fit.get('audio_summary') or {}
-        if summary:
-            st.markdown('#### Audio summary')
-            st.json(summary,expanded=False)
-        spotify_summary=fit.get('spotify_summary') or {}
-        if spotify_summary:
-            st.markdown('#### Spotify summary')
-            st.json(spotify_summary,expanded=False)
-        reference_summary=fit.get('reference_track_summary') or {}
-        if reference_summary:
-            st.markdown('#### Reference song summary')
-            st.json(reference_summary,expanded=False)
-        cyanite_summary=fit.get('cyanite_summary') or {}
-        if cyanite_summary:
-            st.markdown('#### Cyanite summary')
-            st.json(cyanite_summary,expanded=False)
-        release_guidance=fit.get('release_guidance') or {}
-        if release_guidance:
-            st.markdown('#### Release guidance')
-            if release_guidance.get('exclude_new_release_playlists'):
-                st.warning(release_guidance.get('message'))
-            else:
-                st.info(release_guidance.get('message'))
-            st.json(release_guidance,expanded=False)
-        st.markdown('#### Recommended playlist lanes')
-        lane_df=pd.DataFrame(fit.get('recommended_playlist_lanes',[]))
-        if not lane_df.empty: st.dataframe(lane_df[['lane','score','matched_terms','pitch']],use_container_width=True,hide_index=True)
-        matches=fit.get('saved_playlist_matches') or []
-        st.markdown('#### Saved playlist matches')
-        if matches:
-            st.dataframe(pd.DataFrame(matches),use_container_width=True,hide_index=True)
-            if st.button('Save Matches as Outreach Targets',use_container_width=True):
-                saved=save_song_fit_targets(fit.get('song',{}),matches); st.success(f'Saved {saved} new outreach target(s).')
-        else:
-            st.info('No saved playlist matches yet. Add reference artists/descriptors or import more playlists to improve matching.')
-        searches=fit.get('discovery_searches') or []
-        ref_searches=fit.get('reference_song_searches') or []
-        if ref_searches:
-            st.markdown('#### Reference song searches')
-            st.dataframe(pd.DataFrame(ref_searches),use_container_width=True,hide_index=True)
-        if searches:
-            st.markdown('#### Discovery searches')
-            st.caption('These searches are audio-first Spotify playlist queries built from the song mood board. Contact and submission-page discovery happens after candidates are analyzed.')
-            st.dataframe(pd.DataFrame(searches),use_container_width=True,hide_index=True)
-            cfind1,cfind2=st.columns([1,1])
-            with cfind1:
-                per_query=st.number_input('Spotify results per search',min_value=1,max_value=10,value=5,step=1)
-            with cfind2:
-                markets=st.multiselect('Spotify markets',options=ENGLISH_SPOTIFY_MARKETS+['ZA','SG','PH'],default=ENGLISH_SPOTIFY_MARKETS,key='song_fit_markets')
-            if st.button('Find Spotify Playlists',use_container_width=True,disabled=not spotify.configured):
-                queries=[s.get('search_query','') for s in searches if s.get('search_query')]
-                result=search_spotify_playlists_multi_market(queries,int(per_query),markets or ENGLISH_SPOTIFY_MARKETS)
-                if not result.get('ok'): st.error(result.get('error') or 'Spotify playlist search failed.')
-                candidates=score_spotify_playlist_candidates(fit,result.get('playlists',[]),get_all_playlists())
-                st.session_state.spotify_playlist_candidates=candidates
-                st.success(f"Found {len(candidates)} scored playlist candidate(s).")
-            if not spotify.configured:
-                st.caption('Connect Spotify API credentials to search Spotify playlists from Song Fit.')
-        candidates=st.session_state.spotify_playlist_candidates
-        if candidates:
-            st.markdown('#### Spotify playlist candidates')
-            cand_df=pd.DataFrame(candidates)
-            visible_cols=[c for c in ['candidate_fit_score','already_in_crm','playlist_name','curator_name','follower_count','search_query','matched_lanes','matched_descriptors','related_artists','playlist_url'] if c in cand_df.columns]
-            st.dataframe(cand_df[visible_cols],use_container_width=True,hide_index=True)
-            fresh=[c for c in candidates if not c.get('already_in_crm')]
-            csave1,csave2=st.columns(2)
-            with csave1:
-                if st.button('Stage Candidates in Import Queue',use_container_width=True):
-                    st.session_state.playlists=[
-                        {k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']}
-                        for c in fresh
-                    ]
-                    st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Playlists.")
-            with csave2:
-                if st.button('Analyze & Save Candidates to CRM',use_container_width=True):
-                    spotify_summary=fit.get('spotify_summary') or {}
-                    song_info=fit.get('song') or {}
-                    song_context={
-                        'title': song_info.get('title') or spotify_summary.get('title',''),
-                        'artist': song_info.get('artist') or spotify_summary.get('artist',''),
-                        'spotify_url': spotify_summary.get('spotify_url',''),
-                        'release_status': 'released' if spotify_summary.get('spotify_url') else 'unreleased',
-                        'release_age_label': spotify_summary.get('release_age_label',''),
-                    }
-                    rows=[
-                        {**{k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']},'song_context':song_context}
-                        for c in fresh
-                    ]
-                    if rows:
-                        save_raw_json(rows); st.session_state.report=process_playlists(rows,do_web_enrichment=do_web,do_spotify_api=False,queue_email_approval=queue_email,song_context=song_context,playlist_cooldown_days=int(playlist_cooldown_days),minimum_queue_score=int(minimum_queue_score))
-                        st.success(f"Analyzed and saved {len(rows)} Spotify playlist candidate(s).")
-                    else:
-                        st.info('No new candidates to save.')
-        st.markdown('#### Next steps')
-        for step in fit.get('next_steps',[]): st.write(f"- {step}")
-    targets=get_song_fit_targets()
-    if targets:
-        st.markdown('#### Saved song outreach targets')
-        st.dataframe(pd.DataFrame(targets),use_container_width=True,hide_index=True)
 with tab_playlists:
     st.subheader('Playlists')
     st.caption('Upload playlist CSVs, paste Spotify playlist links, analyze them, and review saved playlist ratings.')
+    catalog_song_rows=get_release_songs()
+    if catalog_song_rows:
+        with st.expander('Fetch playlists for catalog songs',expanded=False):
+            st.caption('Select one or more catalog songs, then streambase will use their Spotify metadata and Cyanite tags to find playlist candidates.')
+            selector_rows=[]
+            for song in catalog_song_rows:
+                primary_genre=next((tag.strip() for tag in str(song.get('genre_tags') or '').split(';') if tag.strip()),'')
+                selector_rows.append({
+                    'select':False,
+                    'id':int(song.get('id') or 0),
+                    'title':song.get('title') or song.get('file_name') or 'Untitled',
+                    'artist':song.get('artist_name') or '',
+                    'genre':primary_genre,
+                    'release':song.get('release_status') or '',
+                    'spotify_url':song.get('spotify_url') or '',
+                })
+            selected_df=st.data_editor(
+                pd.DataFrame(selector_rows),
+                use_container_width=True,
+                hide_index=True,
+                key='catalog_song_playlist_selector',
+                disabled=['id','title','artist','genre','release','spotify_url'],
+                column_config={
+                    'select':st.column_config.CheckboxColumn('Fetch',help='Select this song for playlist discovery.'),
+                    'id':None,
+                    'title':st.column_config.TextColumn('Song'),
+                    'artist':st.column_config.TextColumn('Artist'),
+                    'genre':st.column_config.TextColumn('Genre'),
+                    'release':st.column_config.TextColumn('Release'),
+                    'spotify_url':st.column_config.LinkColumn('Spotify'),
+                },
+            )
+            selected_ids=set(selected_df.loc[selected_df['select']==True,'id'].astype(int).tolist()) if not selected_df.empty else set()
+            b1,b2,b3=st.columns(3)
+            with b1:
+                batch_query_limit=st.number_input('Searches per song',min_value=1,max_value=8,value=4,step=1,key='batch_query_limit')
+            with b2:
+                batch_per_query=st.number_input('Results per search',min_value=1,max_value=10,value=5,step=1,key='batch_per_query')
+            with b3:
+                batch_markets=st.multiselect('Markets',options=ENGLISH_SPOTIFY_MARKETS+['ZA','SG','PH'],default=ENGLISH_SPOTIFY_MARKETS,key='batch_markets')
+            if st.button('Fetch Playlists for Selected Songs',type='primary',use_container_width=True,disabled=not selected_ids or not spotify.configured,key='batch_fetch_catalog_playlists'):
+                selected_songs=[song for song in catalog_song_rows if int(song.get('id') or 0) in selected_ids]
+                saved_playlists=get_all_playlists()
+                staged=[]
+                log=[]
+                seen=set()
+                st.caption('Fetching playlist candidates from selected catalog songs...')
+                progress=st.progress(0)
+                batch_status=st.empty()
+                for idx,song in enumerate(selected_songs):
+                    title=song.get('title') or song.get('file_name') or 'Untitled'
+                    batch_status.write(f"Searching for {title}...")
+                    spotify_meta={}
+                    if song.get('spotify_url') and spotify.configured:
+                        spotify_meta=fetch_spotify_track(song.get('spotify_url')) or {}
+                    result=discover_catalog_song_playlists(
+                        song,
+                        saved_playlists=saved_playlists,
+                        spotify_track=spotify_meta,
+                        query_limit=int(batch_query_limit),
+                        limit_per_query=int(batch_per_query),
+                        markets=batch_markets or ENGLISH_SPOTIFY_MARKETS,
+                    )
+                    song_fit=result.get('song_fit') or {}
+                    song_info=song_fit.get('song') or {}
+                    song_context={
+                        'title':song_info.get('title') or title,
+                        'artist':song_info.get('artist') or song.get('artist_name',''),
+                        'spotify_url':(spotify_meta or {}).get('spotify_url') or song.get('spotify_url',''),
+                        'release_status':song.get('release_status') or '',
+                        'release_age_label':((song_fit.get('release_guidance') or {}).get('release_age_label') or ''),
+                        'catalog_song_id':int(song.get('id') or 0),
+                    }
+                    fresh_count=0
+                    for candidate in result.get('candidates',[]):
+                        key=(candidate.get('playlist_url') or candidate.get('spotify_playlist_id') or candidate.get('playlist_name',''),song_context['title'])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        row={k:candidate.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']}
+                        row['song_context']=song_context
+                        staged.append(row)
+                        fresh_count+=1
+                    log.append({'song':title,'queries_run':len(result.get('queries_run',[])),'candidates':fresh_count,'error':result.get('error','')})
+                    progress.progress((idx+1)/max(len(selected_songs),1))
+                st.session_state.batch_playlist_candidates=staged
+                st.session_state.batch_playlist_log=log
+                st.session_state.playlists=staged
+                batch_status.success(f"Fetched {len(staged)} playlist candidate(s) from {len(selected_songs)} song(s).")
+                st.success(f"Staged {len(staged)} playlist candidate(s) below for review.")
+            if not spotify.configured:
+                st.info('Connect Spotify API credentials before batch fetching playlist candidates.')
+            if st.session_state.batch_playlist_log:
+                st.markdown('#### Latest batch')
+                st.dataframe(pd.DataFrame(st.session_state.batch_playlist_log),use_container_width=True,hide_index=True)
     with st.expander('Add playlists',expanded=not bool(get_all_playlists())):
         mode=st.radio('Choose input method',['Upload CSV','Paste Spotify playlist links'],horizontal=True,key='playlist_add_mode')
         if mode=='Paste Spotify playlist links':
@@ -760,8 +755,9 @@ with tab_playlists:
         if st.session_state.playlists:
             st.markdown('#### Review before saving')
             st.caption('Scores improve when rows include playlist title, follower count, related artists, and description.')
+            original_playlist_rows=[dict(row) for row in st.session_state.playlists]
             edited=st.data_editor(df_session(),use_container_width=True,num_rows='dynamic')
-            st.session_state.playlists=edited.fillna('').to_dict(orient='records')
+            st.session_state.playlists=merge_playlist_editor_rows(original_playlist_rows,edited.fillna('').to_dict(orient='records'))
             c1,c2=st.columns(2)
             with c1:
                 if st.button('Analyze & Save Playlists',type='primary',use_container_width=True):

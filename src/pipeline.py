@@ -1,4 +1,5 @@
 import json
+import ast
 from collections import Counter
 from pathlib import Path
 from src.database import init_db, upsert_playlist, get_or_create_curator, upsert_contact_method, get_playlist_scoring_context, queue_email, playlist_outreach_guard
@@ -11,6 +12,23 @@ from src.web_enricher import enrich_contact_info
 def merge_if_empty(target, source, keys):
     for k in keys:
         if source.get(k) and not target.get(k): target[k]=source[k]
+def normalize_song_context(value):
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    if isinstance(value, str):
+        text=value.strip()
+        if not text:
+            return {}
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed=parser(text)
+            except (ValueError, SyntaxError, json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
 def process_playlists(playlists, do_web_enrichment=True, do_spotify_api=False, queue_email_approval=True, song_context=None, playlist_cooldown_days=30, minimum_queue_score=50):
     init_db(); processed=[]; related=Counter(); existing=get_playlist_scoring_context()
     for playlist in playlists:
@@ -23,7 +41,7 @@ def process_playlists(playlists, do_web_enrichment=True, do_spotify_api=False, q
         if contact.get('playlist_name_found') and not playlist.get('playlist_name'): playlist['playlist_name']=contact['playlist_name_found']
         if contact.get('curator_name_found') and not playlist.get('curator_name'): playlist['curator_name']=contact['curator_name_found']
         if contact.get('spotify_description') and not playlist.get('spotify_description'): playlist['spotify_description']=contact['spotify_description']
-        active_song_context=song_context or playlist.get('song_context') or {}
+        active_song_context=normalize_song_context(song_context or playlist.get('song_context') or {})
         sim=compute_similarity(playlist); ix=compute_intersection_score(playlist,existing); scored=score_playlist(sim['similarity_score'],playlist.get('follower_count',0),playlist.get('last_updated',''),contact,ix['intersection_score']); msg=generate_outreach(playlist,sim,active_song_context)
         notes=json.dumps({'score_breakdown':scored['breakdown'],'confidence_score':scored.get('confidence_score',0),'evidence':scored.get('evidence',[]),'intersection':ix,'submithub_verified':contact.get('submithub_verified',False),'submithub_url':contact.get('submithub_url','')},ensure_ascii=True)
         rec={**playlist,'similarity_score':sim['similarity_score'],'intersection_score':ix['intersection_score'],'intersection_breakdown':ix,'similarity_breakdown':sim['breakdown'],'final_score':scored['final_score'],'priority':scored['priority'],'rating_confidence':scored.get('confidence_score',0),'rating_evidence':scored.get('evidence',[]),'email':contact.get('email'),'instagram':contact.get('instagram'),'website':contact.get('website'),'submission_page':contact.get('submission_page'),'link_hub':contact.get('link_hub'),'submithub_verified':contact.get('submithub_verified',False),'submithub_url':contact.get('submithub_url',''),'submithub_confidence':contact.get('submithub_confidence',0),'contact_confidence':contact.get('confidence_score',0),'contact_methods':contact.get('contact_methods',[]),**msg}

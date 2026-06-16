@@ -32,6 +32,8 @@ def init_db(db_path=DB_PATH):
         ensure_column(c,'email_queue','song_url','TEXT')
         ensure_column(c,'email_queue','song_context_json','TEXT')
         ensure_column(c,'songs','file_name','TEXT')
+        ensure_column(c,'songs','artist_name','TEXT')
+        ensure_column(c,'songs','spotify_url','TEXT')
         ensure_column(c,'song_audio_profiles','source','TEXT DEFAULT "manual"')
         ensure_column(c,'song_audio_profiles','raw_analysis_json','TEXT')
         ensure_column(c,'song_audio_profiles','created_at','TEXT')
@@ -253,11 +255,11 @@ def upsert_release_song(song,db_path=DB_PATH):
     if not file_path: return 0
     file_name=song.get('file_name') or Path(file_path).name
     with connect(db_path) as c:
-        c.execute("""INSERT INTO songs (title,file_path,release_status,planned_release_date,campaign_status,created_at,updated_at,file_name)
-                     VALUES (?,?,?,?,?,?,?,?)
+        c.execute("""INSERT INTO songs (title,file_path,release_status,planned_release_date,campaign_status,created_at,updated_at,file_name,artist_name,spotify_url)
+                     VALUES (?,?,?,?,?,?,?,?,?,?)
                      ON CONFLICT(file_path) DO UPDATE SET
-                     title=excluded.title,release_status=excluded.release_status,planned_release_date=excluded.planned_release_date,campaign_status=excluded.campaign_status,updated_at=excluded.updated_at,file_name=excluded.file_name""",
-                  (song.get('title',''),file_path,song.get('release_status','unreleased') or 'unreleased',song.get('planned_release_date',''),song.get('campaign_status','needs_profile') or 'needs_profile',now(),now(),file_name))
+                     title=excluded.title,release_status=excluded.release_status,planned_release_date=excluded.planned_release_date,campaign_status=excluded.campaign_status,updated_at=excluded.updated_at,file_name=excluded.file_name,artist_name=excluded.artist_name,spotify_url=excluded.spotify_url""",
+                  (song.get('title',''),file_path,song.get('release_status','unreleased') or 'unreleased',song.get('planned_release_date',''),song.get('campaign_status','needs_profile') or 'needs_profile',now(),now(),file_name,song.get('artist_name',''),song.get('spotify_url','')))
         row=c.execute('SELECT id FROM songs WHERE file_path=?',(file_path,)).fetchone()
         song_id=int(row['id']) if row else 0
         if song_id:

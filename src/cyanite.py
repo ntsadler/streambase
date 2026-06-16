@@ -315,6 +315,8 @@ def normalize_cyanite_tags(raw: Dict) -> Dict:
     keywords = flatten(raw.get("keywords") or raw.get("tags"))
     energy = raw.get("energy") or raw.get("energyLevel") or ""
     voice = raw.get("voice") or raw.get("vocalPresence") or ""
+    movement = raw.get("movement") or raw.get("movementTags") or ""
+    musical_era = raw.get("musical_era") or raw.get("musicalEraTag") or ""
     bpm = raw.get("bpm") or raw.get("tempo") or ""
 
     return {
@@ -325,8 +327,10 @@ def normalize_cyanite_tags(raw: Dict) -> Dict:
         "keywords": keywords,
         "energy": energy,
         "voice": voice,
+        "movement": "; ".join(flatten(movement)) if isinstance(movement, list) else movement,
+        "musical_era": musical_era,
         "bpm": bpm,
-        "descriptors": "; ".join([str(x) for x in genres + moods + instruments + keywords if x]),
+        "descriptors": "; ".join([str(x) for x in genres + moods + instruments + keywords + flatten(movement) if x]),
     }
 
 

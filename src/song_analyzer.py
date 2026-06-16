@@ -61,6 +61,33 @@ NEW_RELEASE_TERMS = [
     "debut",
 ]
 
+DISCOVERY_INTENT_TERMS = [
+    "emerging artists",
+    "independent artists",
+    "artist discovery",
+    "unsigned",
+    "new artists",
+    "up and coming",
+    "rising artists",
+    "fresh finds",
+    "discover weekly",
+]
+
+THROWBACK_TERMS = [
+    "throwback",
+    "old school",
+    "oldschool",
+    "classic hits",
+    "classics",
+    "nostalgia",
+    "y2k",
+    "2000s",
+    "90s",
+    "80s",
+    "70s",
+    "60s",
+]
+
 
 def _wav_features(file_bytes: bytes) -> Dict:
     try:
@@ -157,16 +184,30 @@ def is_new_release_context(text: str) -> bool:
     return any(term in hay for term in NEW_RELEASE_TERMS)
 
 
+def discovery_intent_hits(text: str) -> List[str]:
+    hay = (text or "").lower()
+    return [term for term in DISCOVERY_INTENT_TERMS if term in hay]
+
+
+def throwback_context_hits(text: str) -> List[str]:
+    hay = (text or "").lower()
+    return [term for term in THROWBACK_TERMS if term in hay]
+
+
 def _playlist_match_score(profile_text: str, references: List[str], playlist: Dict, lane_names: List[str], release=None) -> Dict:
     release = release or {}
     hay = " ".join(str(playlist.get(k, "")) for k in ["name", "related_artists", "spotify_description", "curator_name"]).lower()
     shared_refs = [r for r in references if r.lower() and r.lower() in hay]
     lane_hits = [lane for lane in lane_names if any(part in hay for part in lane.lower().split(" / "))]
     descriptor_hits = [term for term in split_terms(profile_text) if len(term) > 3 and term.lower() in hay]
-    base = min(100, len(shared_refs) * 24 + len(lane_hits) * 18 + len(descriptor_hits) * 8)
+    discovery_hits = discovery_intent_hits(hay)
+    throwback_hits = throwback_context_hits(hay)
+    base = min(100, len(shared_refs) * 24 + len(lane_hits) * 18 + len(descriptor_hits) * 8 + len(discovery_hits) * 12)
     excluded = release.get("exclude_new_release_playlists") and is_new_release_context(hay)
     if excluded:
         base = 0
+    if throwback_hits and not discovery_hits:
+        base = max(0, base - 55)
     crm_bonus = min(15, float(playlist.get("final_score") or 0) * 0.15)
     return {
         "playlist_name": playlist.get("name", ""),
@@ -177,6 +218,8 @@ def _playlist_match_score(profile_text: str, references: List[str], playlist: Di
         "shared_reference_artists": shared_refs,
         "matched_lanes": lane_hits,
         "matched_descriptors": descriptor_hits[:8],
+        "discovery_intent_hits": discovery_hits,
+        "throwback_context_hits": throwback_hits,
     }
 
 
@@ -218,6 +261,51 @@ def merge_reference_track_profile(reference_tracks: List[Dict]) -> Dict:
         "descriptors": "; ".join(unique_descriptors),
         "average_popularity": avg_popularity,
     }
+
+
+def cyanite_evidence_terms(cyanite_profile: Dict) -> List[str]:
+    profile = cyanite_profile or {}
+    raw_terms = []
+    for key in ["genres", "moods", "instruments", "keywords"]:
+        value = profile.get(key)
+        if isinstance(value, list):
+            raw_terms.extend(value)
+        elif value:
+            raw_terms.extend(split_terms(str(value)))
+    for key in ["voice", "movement", "energy", "musical_era", "descriptors"]:
+        if profile.get(key):
+            raw_terms.extend(split_terms(str(profile.get(key))))
+    seen = set()
+    terms = []
+    for term in raw_terms:
+        clean = " ".join(str(term).split())
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            terms.append(clean)
+    return terms
+
+
+def cyanite_search_terms(cyanite_profile: Dict) -> List[str]:
+    profile = cyanite_profile or {}
+    prioritized = []
+    for key, limit in [("genres", 3), ("moods", 2), ("instruments", 2)]:
+        value = profile.get(key)
+        terms = value if isinstance(value, list) else split_terms(str(value or ""))
+        prioritized.extend([term for term in terms if term][:limit])
+    if profile.get("voice"):
+        prioritized.extend(split_terms(str(profile.get("voice")))[:1])
+    if profile.get("movement"):
+        prioritized.extend(split_terms(str(profile.get("movement")))[:1])
+    seen = set()
+    terms = []
+    for term in prioritized:
+        clean = " ".join(str(term).split())
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            terms.append(clean)
+    return terms[:7]
 
 
 def spotify_summary(spotify_track: Dict) -> Dict:
@@ -266,8 +354,9 @@ def release_profile(spotify_track: Dict) -> Dict:
 def discovery_searches(top_lanes, song, release=None):
     release = release or {}
     descriptors = split_terms(song.get("descriptors", ""))
-    if not descriptors and song.get("cyanite_summary"):
-        descriptors = split_terms(song.get("cyanite_summary", {}).get("descriptors", ""))
+    if song.get("cyanite_summary"):
+        cyanite_terms = cyanite_search_terms(song.get("cyanite_summary", {}))
+        descriptors = cyanite_terms + [term for term in descriptors if term.lower() not in {x.lower() for x in cyanite_terms}]
     descriptors = [term for term in descriptors if len(term) > 2]
     searches = []
     for lane in top_lanes:
@@ -281,13 +370,25 @@ def discovery_searches(top_lanes, song, release=None):
             clean = " ".join(str(term).split())
             if clean and clean.lower() not in {t.lower() for t in audio_terms}:
                 audio_terms.append(clean)
+        audio_core = audio_terms[:4] + lane_terms[:1]
         if release.get("exclude_new_release_playlists"):
-            audio_terms.append("evergreen")
-        audio_terms.append("playlist")
+            audio_core.append("evergreen")
+        for intent in ["emerging artists", "independent artists"]:
+            query_terms = audio_core + [intent, "playlist"]
+            query = " ".join(query_terms[:8]).strip()
+            if query:
+                searches.append(
+                    {
+                        "lane": lane["lane"],
+                        "source": "emerging_artist_discovery",
+                        "search_query": query,
+                    }
+                )
         searches.append(
             {
                 "lane": lane["lane"],
-                "search_query": " ".join(audio_terms[:7]).strip(),
+                "source": "audio_discovery",
+                "search_query": " ".join((audio_core + ["artist discovery", "playlist"])[:8]).strip(),
             }
         )
     return searches
@@ -334,15 +435,16 @@ def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", d
     summary = audio_summary(uploaded_file)
     reference_profile = merge_reference_track_profile(reference_tracks or [])
     cyanite_profile = cyanite_profile or {}
+    cyanite_terms = cyanite_evidence_terms(cyanite_profile)
     if reference_profile:
         reference_artists = "; ".join([x for x in [reference_artists, reference_profile.get("reference_artists", "")] if x])
         descriptors = "; ".join([x for x in [descriptors, reference_profile.get("descriptors", "")] if x])
-    if cyanite_profile:
-        descriptors = "; ".join([x for x in [descriptors, cyanite_profile.get("descriptors", "")] if x])
+    if cyanite_terms:
+        descriptors = "; ".join([x for x in [descriptors, "; ".join(cyanite_terms)] if x])
     merged = merge_song_metadata(title, artist, reference_artists, descriptors, spotify_track)
     release = release_profile(spotify_track or {})
     references = split_terms(merged["reference_artists"])
-    text = " ".join([merged["title"], merged["artist"], merged["reference_artists"], merged["descriptors"], summary.get("file_name", ""), summary.get("energy_label", ""), str(cyanite_profile.get("energy", "")), str(cyanite_profile.get("voice", ""))]).lower()
+    text = " ".join([merged["title"], merged["artist"], merged["reference_artists"], merged["descriptors"], summary.get("file_name", ""), summary.get("energy_label", ""), " ".join(cyanite_terms)]).lower()
     lanes = sorted([_score_lane(text, lane, summary, spotify_track, cyanite_profile) for lane in PLAYLIST_LANES], key=lambda x: x["score"], reverse=True)
     top_lanes = [lane for lane in lanes if not lane.get("excluded_for_release_age")][:3]
     matches = []
@@ -357,6 +459,7 @@ def analyze_song_fit(uploaded_file, title="", artist="", reference_artists="", d
         "spotify_summary": spotify_summary(spotify_track or {}),
         "reference_track_summary": reference_profile,
         "cyanite_summary": cyanite_profile,
+        "cyanite_evidence_terms": cyanite_terms,
         "release_guidance": {
             **release,
             "message": "Older catalog track: Streambase will avoid playlists explicitly focused on new releases." if release.get("exclude_new_release_playlists") else "Release age is compatible with new-release and evergreen playlist pitching.",
@@ -400,10 +503,13 @@ def score_spotify_playlist_candidates(song_fit: Dict, candidates: List[Dict], ex
         match = _playlist_match_score(";".join([descriptors, candidate.get("search_query", "")]), references, playlist_like, lane_names, release)
         if match.get("excluded_for_release_age"):
             continue
+        if match.get("throwback_context_hits") and not match.get("discovery_intent_hits"):
+            continue
         follower_count = int(candidate.get("follower_count") or 0)
         follower_bonus = 10 if 500 <= follower_count <= 100000 else 4 if follower_count > 0 else 0
         query_bonus = 8 if candidate.get("search_query") else 0
-        fit_score = min(100, match.get("fit_score", 0) + follower_bonus + query_bonus)
+        discovery_bonus = 10 if match.get("discovery_intent_hits") else 0
+        fit_score = min(100, match.get("fit_score", 0) + follower_bonus + query_bonus + discovery_bonus)
         scored.append(
             {
                 **candidate,
@@ -412,6 +518,8 @@ def score_spotify_playlist_candidates(song_fit: Dict, candidates: List[Dict], ex
                 "shared_reference_artists": match.get("shared_reference_artists", []),
                 "matched_lanes": match.get("matched_lanes", []),
                 "matched_descriptors": match.get("matched_descriptors", []),
+                "discovery_intent_hits": match.get("discovery_intent_hits", []),
+                "throwback_context_hits": match.get("throwback_context_hits", []),
                 "excluded_for_release_age": False,
             }
         )
