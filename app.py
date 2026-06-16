@@ -187,7 +187,7 @@ def catalog_tag_summary(catalog_rows):
             counts[key]['song_count']+=1
     return sorted(counts.values(),key=lambda row:(-row['song_count'],row['tag'].lower()))
 
-tab_scan,tab_catalog,tab_import,tab_song,tab_results,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Import & Analyze','Song Fit','Playlist Results','Curator CRM','Email Queue'])
+tab_scan,tab_catalog,tab_song,tab_playlists,tab_curators,tab_email=st.tabs(['Scan A Song','Catalog','Song Fit','Playlists','Curator CRM','Email Queue'])
 with tab_scan:
     st.markdown('### Scan A Song')
     st.caption('Upload a WAV or MP3, scan it with Cyanite, and review the genre/mood board as soon as the analysis finishes.')
@@ -397,7 +397,7 @@ with tab_scan:
                                 {k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']}
                                 for c in fresh
                             ]
-                            st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Import & Analyze.")
+                            st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Playlists.")
                     with sc2:
                         if st.button('Analyze & Save Candidates to CRM',use_container_width=True,key='home_save_candidates'):
                             song_context={
@@ -506,42 +506,6 @@ with tab_catalog:
     else:
         st.info('No uploaded songs yet. Songs appear here after they are uploaded from Scan A Song or Release Prep.')
     st.caption(f"Audio folder: data/audio_uploads · Song profile backup: data/song_profiles.json")
-with tab_import:
-    st.subheader('Import playlist data')
-    mode=st.radio('Choose input method',['Paste Spotify playlist links','Upload CSV'],horizontal=True)
-    if mode=='Paste Spotify playlist links':
-        raw=st.text_area('Spotify playlist links',height=160,placeholder='https://open.spotify.com/playlist/...')
-        c1,c2=st.columns(2)
-        with c1:
-            if st.button('Load pasted links',use_container_width=True): st.session_state.playlists=playlists_from_links(raw); st.success(f"Loaded {len(st.session_state.playlists)} playlist links.")
-        with c2:
-            if st.button('Fetch Spotify Details',use_container_width=True):
-                if not st.session_state.playlists: st.error('Load playlist links first.')
-                else:
-                    updated=[]; prog=st.progress(0)
-                    for i,row in enumerate(st.session_state.playlists):
-                        row=dict(row); meta=enrich_playlist_from_url(row.get('playlist_url',''))
-                        if meta.get('playlist_name') and not row.get('playlist_name'): row['playlist_name']=meta['playlist_name']
-                        if meta.get('curator_name') and not row.get('curator_name'): row['curator_name']=meta['curator_name']
-                        if meta.get('spotify_description'): row['spotify_description']=meta['spotify_description']
-                        updated.append(row); prog.progress((i+1)/max(len(st.session_state.playlists),1))
-                    st.session_state.playlists=updated; st.success('Spotify details fetched where available.')
-    else:
-        up=st.file_uploader('Choose CSV file',type=['csv'])
-        if up: st.session_state.playlists=load_playlists_from_text(up.read().decode('utf-8-sig')); st.success(f"Loaded {len(st.session_state.playlists)} playlists from CSV.")
-    if st.session_state.playlists:
-        st.markdown('#### Edit details before analysis')
-        st.caption('For a useful score, add related artists like `MGMT; LCD Soundsystem; Tame Impala` and follower counts if you know them.')
-        edited=st.data_editor(df_session(),use_container_width=True,num_rows='dynamic')
-        st.session_state.playlists=edited.fillna('').to_dict(orient='records')
-        c1,c2=st.columns(2)
-        with c1:
-            if st.button('Analyze & Save to CRM',type='primary',use_container_width=True):
-                with st.spinner('Scoring playlists, finding contacts, and saving curator profiles...'):
-                    save_raw_json(st.session_state.playlists); st.session_state.report=process_playlists(st.session_state.playlists,do_web_enrichment=do_web,do_spotify_api=do_spotify,queue_email_approval=queue_email,playlist_cooldown_days=int(playlist_cooldown_days),minimum_queue_score=int(minimum_queue_score))
-                st.success('Analysis complete. Curator CRM updated.')
-        with c2:
-            if st.button('Clear Import',use_container_width=True): st.session_state.playlists=[]; st.session_state.report=None; st.rerun()
 with tab_song:
     st.subheader('Song playlist fit')
     st.caption('Use audio for sound analysis and a Spotify link for release age, title/artist metadata, and the curator-facing pitch URL.')
@@ -735,7 +699,7 @@ with tab_song:
                         {k:c.get(k,'') for k in ['playlist_name','playlist_url','follower_count','curator_name','related_artists','spotify_description','spotify_playlist_id']}
                         for c in fresh
                     ]
-                    st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Import & Analyze.")
+                    st.success(f"Staged {len(st.session_state.playlists)} candidate(s) in Playlists.")
             with csave2:
                 if st.button('Analyze & Save Candidates to CRM',use_container_width=True):
                     spotify_summary=fit.get('spotify_summary') or {}
@@ -762,28 +726,108 @@ with tab_song:
     if targets:
         st.markdown('#### Saved song outreach targets')
         st.dataframe(pd.DataFrame(targets),use_container_width=True,hide_index=True)
-with tab_results:
-    st.subheader('Playlist results')
-    rep=st.session_state.report; rows=get_all_playlists()
+with tab_playlists:
+    st.subheader('Playlists')
+    st.caption('Upload playlist CSVs, paste Spotify playlist links, analyze them, and review saved playlist ratings.')
+    with st.expander('Add playlists',expanded=not bool(get_all_playlists())):
+        mode=st.radio('Choose input method',['Upload CSV','Paste Spotify playlist links'],horizontal=True,key='playlist_add_mode')
+        if mode=='Paste Spotify playlist links':
+            raw=st.text_area('Spotify playlist links',height=140,placeholder='https://open.spotify.com/playlist/...',key='playlist_paste_links')
+            c1,c2=st.columns(2)
+            with c1:
+                if st.button('Load Pasted Links',use_container_width=True):
+                    st.session_state.playlists=playlists_from_links(raw)
+                    st.success(f"Loaded {len(st.session_state.playlists)} playlist link(s).")
+            with c2:
+                if st.button('Fetch Spotify Details',use_container_width=True):
+                    if not st.session_state.playlists:
+                        st.error('Load playlist links first.')
+                    else:
+                        updated=[]; prog=st.progress(0)
+                        for i,row in enumerate(st.session_state.playlists):
+                            row=dict(row); meta=enrich_playlist_from_url(row.get('playlist_url',''))
+                            if meta.get('playlist_name') and not row.get('playlist_name'): row['playlist_name']=meta['playlist_name']
+                            if meta.get('curator_name') and not row.get('curator_name'): row['curator_name']=meta['curator_name']
+                            if meta.get('spotify_description'): row['spotify_description']=meta['spotify_description']
+                            updated.append(row); prog.progress((i+1)/max(len(st.session_state.playlists),1))
+                        st.session_state.playlists=updated
+                        st.success('Spotify details fetched where available.')
+        else:
+            up=st.file_uploader('Choose playlist CSV',type=['csv'],key='playlist_csv_upload')
+            if up:
+                st.session_state.playlists=load_playlists_from_text(up.read().decode('utf-8-sig'))
+                st.success(f"Loaded {len(st.session_state.playlists)} playlist(s) from CSV.")
+        if st.session_state.playlists:
+            st.markdown('#### Review before saving')
+            st.caption('Scores improve when rows include playlist title, follower count, related artists, and description.')
+            edited=st.data_editor(df_session(),use_container_width=True,num_rows='dynamic')
+            st.session_state.playlists=edited.fillna('').to_dict(orient='records')
+            c1,c2=st.columns(2)
+            with c1:
+                if st.button('Analyze & Save Playlists',type='primary',use_container_width=True):
+                    with st.spinner('Scoring playlists, finding contacts, and saving curator profiles...'):
+                        save_raw_json(st.session_state.playlists)
+                        st.session_state.report=process_playlists(st.session_state.playlists,do_web_enrichment=do_web,do_spotify_api=do_spotify,queue_email_approval=queue_email,playlist_cooldown_days=int(playlist_cooldown_days),minimum_queue_score=int(minimum_queue_score))
+                    st.success('Analysis complete. Playlists saved.')
+            with c2:
+                if st.button('Clear Loaded Playlists',use_container_width=True):
+                    st.session_state.playlists=[]; st.session_state.report=None; st.rerun()
+
+    rep=st.session_state.report
+    rows=get_all_playlists()
     if rep:
-        a,b,c=st.columns(3); a.metric('Processed',rep['total_playlists_processed']); b.metric('Contactable',rep['contactable_curators_count']); c.metric('% contactable',f"{rep['contactable_curators_percent']}%")
+        a,b,c=st.columns(3)
+        a.metric('Processed',rep['total_playlists_processed'])
+        b.metric('Contactable',rep['contactable_curators_count'])
+        c.metric('% Contactable',f"{rep['contactable_curators_percent']}%")
     if rows:
-        df=pd.DataFrame(rows); st.dataframe(df,use_container_width=True,hide_index=True)
-        st.download_button('Download CRM Playlists CSV',df.to_csv(index=False).encode('utf-8'),'streambase_playlists.csv','text/csv')
-    else: st.info('No playlists saved yet.')
+        df=pd.DataFrame(rows)
+        display=df.copy()
+        if 'name' in display.columns and 'playlist_name' not in display.columns:
+            display['playlist_name']=display['name']
+        if 'url' in display.columns and 'playlist_url' not in display.columns:
+            display['playlist_url']=display['url']
+        for col in ['playlist_name','curator_name','final_score','priority','followers','similarity_score','intersection_score','status','playlist_url']:
+            if col not in display.columns:
+                display[col]=''
+        display=display.sort_values('final_score',ascending=False)
+        st.markdown('#### Saved Playlists')
+        st.dataframe(
+            display[['playlist_name','final_score','priority','followers','curator_name','similarity_score','intersection_score','status','playlist_url']],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'playlist_name':st.column_config.TextColumn('Playlist'),
+                'final_score':st.column_config.ProgressColumn('Rating',min_value=0,max_value=100,format='%.0f'),
+                'priority':st.column_config.TextColumn('Decision'),
+                'followers':st.column_config.NumberColumn('Followers',format='%d'),
+                'curator_name':st.column_config.TextColumn('Curator'),
+                'similarity_score':st.column_config.NumberColumn('Similarity',format='%.0f'),
+                'intersection_score':st.column_config.NumberColumn('Overlap',format='%.0f'),
+                'status':st.column_config.TextColumn('Status'),
+                'playlist_url':st.column_config.LinkColumn('Spotify URL'),
+            },
+        )
+        st.download_button('Download Playlists CSV',df.to_csv(index=False).encode('utf-8'),'streambase_playlists.csv','text/csv')
+    else:
+        st.info('No playlists saved yet. Upload a CSV or paste Spotify playlist links above.')
     if rep:
         st.subheader('Outreach drafts from latest run')
         for item in sorted(rep['processed_playlists'],key=lambda x:x.get('final_score',0),reverse=True)[:10]:
-            with st.expander(f"{item.get('playlist_name') or 'Unnamed'} — {item.get('final_score')}"):
+            with st.expander(f"{item.get('playlist_name') or 'Unnamed'} · {item.get('final_score')} · {item.get('priority')}"):
                 st.write(f"Curator: {item.get('curator_name') or 'Unknown'}")
-                st.write(f"Similarity: {item.get('similarity_score')} | Intersection: {item.get('intersection_score')} | Contact confidence: {item.get('contact_confidence')}")
+                st.write(f"Similarity: {item.get('similarity_score')} | Overlap: {item.get('intersection_score')} | Contact confidence: {item.get('contact_confidence')}")
                 st.write(f"Email: {item.get('email') or 'Not found'} | Instagram: {item.get('instagram') or 'Not found'} | Submission: {item.get('submission_page') or 'Not found'}")
                 st.write(f"SubmitHub verified: {'yes' if item.get('submithub_verified') else 'no'} | SubmitHub URL: {item.get('submithub_url') or 'Not found'}")
+                breakdown=(item.get('similarity_breakdown') or {})
+                scoring=(item.get('scoring_notes') or {})
                 guard=item.get('outreach_guard') or {}
                 if item.get('email_queue_blocked'):
                     st.warning(item.get('email_queue_block_reason') or guard.get('reason') or 'Email queue blocked by playlist safeguard.')
                 elif item.get('email_queue_id'):
                     st.success(f"Queued email approval #{item.get('email_queue_id')}")
+                if breakdown:
+                    st.json(breakdown,expanded=False)
                 ix=item.get('intersection_breakdown') or {}
                 if ix: st.json(ix,expanded=False)
                 st.text_area('Email',item.get('email_message',''),height=160,key=f"e_{item.get('playlist_url')}")
