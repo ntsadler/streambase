@@ -14,6 +14,8 @@ class ChartmetricAPI:
         self.api_token = api_token or os.getenv("CHARTMETRIC_API_TOKEN", "")
         self.base_url = (base_url or os.getenv("CHARTMETRIC_API_BASE_URL", "https://api.chartmetric.com/api")).rstrip("/")
         self.timeout = timeout
+        self.last_status_code = 0
+        self.last_response_headers = {}
 
     @property
     def configured(self) -> bool:
@@ -31,6 +33,8 @@ class ChartmetricAPI:
             params=params or {},
             timeout=self.timeout,
         )
+        self.last_status_code = resp.status_code
+        self.last_response_headers = dict(resp.headers or {})
         resp.raise_for_status()
         return resp.json()
 

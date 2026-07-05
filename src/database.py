@@ -12,6 +12,9 @@ def init_db(db_path=DB_PATH):
         c.execute("CREATE TABLE IF NOT EXISTS contact_methods (id INTEGER PRIMARY KEY AUTOINCREMENT,curator_id INTEGER,type TEXT,value TEXT,source_url TEXT,confidence_score INTEGER,status TEXT DEFAULT 'new',created_at TEXT,UNIQUE(curator_id,type,value))")
         c.execute("CREATE TABLE IF NOT EXISTS outreach_events (id INTEGER PRIMARY KEY AUTOINCREMENT,curator_id INTEGER,playlist_id INTEGER,channel TEXT,event_type TEXT,message TEXT,created_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS email_queue (id INTEGER PRIMARY KEY AUTOINCREMENT,curator_id INTEGER,playlist_id INTEGER,to_email TEXT,subject TEXT,body TEXT,status TEXT DEFAULT 'pending_approval',created_at TEXT,updated_at TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS outreach_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,song_id INTEGER DEFAULT 0,name TEXT,status TEXT DEFAULT 'draft',subject_template TEXT,body_template TEXT,specifications_json TEXT,created_at TEXT,updated_at TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS outreach_campaign_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id INTEGER,playlist_id INTEGER,fit_score REAL DEFAULT 0,reason TEXT,email_status TEXT DEFAULT 'pending',instagram_status TEXT DEFAULT 'pending',submission_status TEXT DEFAULT 'pending',created_at TEXT,updated_at TEXT,UNIQUE(campaign_id,playlist_id))")
+        c.execute("CREATE TABLE IF NOT EXISTS email_replies (id INTEGER PRIMARY KEY AUTOINCREMENT,gmail_message_id TEXT UNIQUE,gmail_thread_id TEXT,email_queue_id INTEGER DEFAULT 0,curator_id INTEGER DEFAULT 0,playlist_id INTEGER DEFAULT 0,from_email TEXT,from_name TEXT,subject TEXT,snippet TEXT,received_at TEXT,match_status TEXT DEFAULT 'unmatched',created_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS song_fit_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,song_title TEXT,artist_name TEXT,playlist_name TEXT,playlist_url TEXT,curator_name TEXT,fit_score REAL,status TEXT DEFAULT 'target',notes TEXT,created_at TEXT,UNIQUE(song_title,artist_name,playlist_url))")
         c.execute("CREATE TABLE IF NOT EXISTS artist_songs (id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT,file_path TEXT UNIQUE,bpm REAL,key TEXT,genre_tags TEXT,mood_tags TEXT,energy TEXT,danceability REAL,instrumentation TEXT,vocal_style TEXT,reference_artists TEXT,notes TEXT,created_at TEXT,updated_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS artist_sound_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT,profile_name TEXT UNIQUE,song_count INTEGER,profile_json TEXT,created_at TEXT,updated_at TEXT)")
@@ -22,6 +25,8 @@ def init_db(db_path=DB_PATH):
         c.execute("CREATE TABLE IF NOT EXISTS campaign_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id INTEGER,playlist_target_id INTEGER,channel TEXT,status TEXT DEFAULT 'planned',copy_direction TEXT,created_at TEXT,updated_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS artist_references (id INTEGER PRIMARY KEY AUTOINCREMENT,artist_name TEXT,source TEXT,confidence_score REAL DEFAULT 0,approved_by_user INTEGER DEFAULT 0,rejected_by_user INTEGER DEFAULT 0,notes TEXT,created_at TEXT,updated_at TEXT,UNIQUE(artist_name,source))")
         c.execute("CREATE TABLE IF NOT EXISTS mining_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,profile_name TEXT,source TEXT DEFAULT 'chartmetric',status TEXT DEFAULT 'planned',query_count INTEGER DEFAULT 0,result_count INTEGER DEFAULT 0,profile_json TEXT,target_json TEXT,error TEXT,created_at TEXT,updated_at TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS mining_query_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,mining_job_id INTEGER,source TEXT DEFAULT 'chartmetric',query_type TEXT,query TEXT,status TEXT DEFAULT 'planned',request_count INTEGER DEFAULT 0,result_count INTEGER DEFAULT 0,saved_count INTEGER DEFAULT 0,filtered_count INTEGER DEFAULT 0,error TEXT,raw_response_json TEXT,started_at TEXT,completed_at TEXT,updated_at TEXT,UNIQUE(mining_job_id,query_type,query))")
+        c.execute("CREATE TABLE IF NOT EXISTS api_usage_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,operation TEXT,query TEXT,status_code INTEGER DEFAULT 0,request_count INTEGER DEFAULT 1,credits_used INTEGER DEFAULT 0,remaining_credits INTEGER,rate_limited INTEGER DEFAULT 0,error TEXT,created_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS mined_playlists (id INTEGER PRIMARY KEY AUTOINCREMENT,mining_job_id INTEGER,source TEXT DEFAULT 'chartmetric',query TEXT,playlist_name TEXT,playlist_url TEXT,curator_name TEXT,follower_count INTEGER,spotify_description TEXT,last_updated TEXT,chartmetric_playlist_id TEXT,raw_json TEXT,status TEXT DEFAULT 'mined',created_at TEXT,UNIQUE(source,playlist_url,query))")
         ensure_column(c,'playlists','intersection_score','REAL DEFAULT 0')
         ensure_column(c,'playlists','spotify_playlist_id','TEXT')
@@ -31,6 +36,8 @@ def init_db(db_path=DB_PATH):
         ensure_column(c,'email_queue','song_title','TEXT')
         ensure_column(c,'email_queue','song_url','TEXT')
         ensure_column(c,'email_queue','song_context_json','TEXT')
+        ensure_column(c,'email_queue','campaign_id','INTEGER DEFAULT 0')
+        ensure_column(c,'outreach_events','campaign_id','INTEGER DEFAULT 0')
         ensure_column(c,'songs','file_name','TEXT')
         ensure_column(c,'songs','artist_name','TEXT')
         ensure_column(c,'songs','spotify_url','TEXT')
@@ -45,6 +52,15 @@ def init_db(db_path=DB_PATH):
         ensure_column(c,'artist_sound_profiles','recommended_playlist_keywords','TEXT')
         ensure_column(c,'artist_sound_profiles','recommended_chartmetric_targets','TEXT')
         ensure_column(c,'artist_sound_profiles','raw_profile_json','TEXT')
+        ensure_column(c,'mined_playlists','fit_score','REAL DEFAULT 0')
+        ensure_column(c,'mined_playlists','fit_reason','TEXT')
+        ensure_column(c,'mined_playlists','best_song_titles','TEXT')
+        ensure_column(c,'mined_playlists','follower_tier','TEXT')
+        ensure_column(c,'mined_playlists','matched_terms','TEXT')
+        ensure_column(c,'song_playlist_targets','source','TEXT')
+        ensure_column(c,'song_playlist_targets','related_artists','TEXT')
+        ensure_column(c,'song_playlist_targets','raw_json','TEXT')
+        ensure_column(c,'song_playlist_targets','updated_at','TEXT')
         c.commit()
 def ensure_column(conn,table,column,definition):
     cols={r['name'] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()}
@@ -64,9 +80,16 @@ def upsert_contact_method(curator_id,m,db_path=DB_PATH):
     if not m.get('value') or not m.get('type'): return
     with connect(db_path) as c:
         c.execute("INSERT OR IGNORE INTO contact_methods (curator_id,type,value,source_url,confidence_score,status,created_at) VALUES (?,?,?,?,?,?,?)",(curator_id,m.get('type'),m.get('value'),m.get('source_url',''),int(m.get('confidence_score') or 0),m.get('status','new'),now())); c.commit()
-def add_outreach_event(curator_id,playlist_id,channel,event_type,message='',db_path=DB_PATH):
+def add_outreach_event(curator_id,playlist_id,channel,event_type,message='',db_path=DB_PATH,campaign_id=0):
     with connect(db_path) as c:
-        c.execute('INSERT INTO outreach_events (curator_id,playlist_id,channel,event_type,message,created_at) VALUES (?,?,?,?,?,?)',(curator_id,playlist_id,channel,event_type,message,now())); c.commit()
+        c.execute('INSERT INTO outreach_events (curator_id,playlist_id,channel,event_type,message,created_at,campaign_id) VALUES (?,?,?,?,?,?,?)',(curator_id,playlist_id,channel,event_type,message,now(),int(campaign_id or 0))); c.commit()
+def get_outreach_events_for_playlists(playlist_ids,db_path=DB_PATH):
+    ids=[int(x) for x in playlist_ids if x]
+    if not ids: return []
+    marks=','.join(['?']*len(ids))
+    with connect(db_path) as c:
+        rows=c.execute(f'SELECT * FROM outreach_events WHERE playlist_id IN ({marks}) ORDER BY created_at DESC',ids).fetchall()
+    return [dict(r) for r in rows]
 def update_playlist_status(playlist_id,status,db_path=DB_PATH):
     with connect(db_path) as c: c.execute('UPDATE playlists SET status=? WHERE id=?',(status,playlist_id)); c.commit()
 def _parse_dt(value):
@@ -99,7 +122,7 @@ def playlist_outreach_guard(playlist_id,song_context=None,cooldown_days=30,db_pa
     if blocking:
         return {'allowed':False,'reason':f"Playlist contacted {blocking['days_since']} day(s) ago for {blocking['song_title']}. Wait until the {cooldown_days}-day cooldown clears or override manually.",'cooldown_days':cooldown_days,'last_outreach':blocking,'song_title':song_context.get('title') or song_context.get('song_title','')}
     return {'allowed':True,'reason':'No recent playlist outreach found.','cooldown_days':cooldown_days,'last_outreach':recent[0] if recent else None,'song_title':song_context.get('title') or song_context.get('song_title','')}
-def queue_email(curator_id,playlist_id,to_email,subject,body,db_path=DB_PATH,song_context=None,cooldown_days=30,enforce_cooldown=True):
+def queue_email(curator_id,playlist_id,to_email,subject,body,db_path=DB_PATH,song_context=None,cooldown_days=30,enforce_cooldown=True,campaign_id=0):
     if not to_email or not body: return 0
     if enforce_cooldown:
         guard=playlist_outreach_guard(playlist_id,song_context,cooldown_days,db_path)
@@ -111,19 +134,137 @@ def queue_email(curator_id,playlist_id,to_email,subject,body,db_path=DB_PATH,son
     with connect(db_path) as c:
         row=c.execute("SELECT id FROM email_queue WHERE curator_id=? AND playlist_id=? AND to_email=? AND status='pending_approval'",(curator_id,playlist_id,to_email)).fetchone()
         if row: return int(row['id'])
-        cur=c.execute('INSERT INTO email_queue (curator_id,playlist_id,to_email,subject,body,status,created_at,updated_at,song_title,song_url,song_context_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',(curator_id,playlist_id,to_email,subject,body,'pending_approval',now(),now(),song_title,song_url,song_json))
+        cur=c.execute('INSERT INTO email_queue (curator_id,playlist_id,to_email,subject,body,status,created_at,updated_at,song_title,song_url,song_context_json,campaign_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(curator_id,playlist_id,to_email,subject,body,'pending_approval',now(),now(),song_title,song_url,song_json,int(campaign_id or 0)))
         c.commit(); return int(cur.lastrowid)
 def update_email_queue_status(queue_id,status,db_path=DB_PATH):
     with connect(db_path) as c: c.execute('UPDATE email_queue SET status=?, updated_at=? WHERE id=?',(status,now(),queue_id)); c.commit()
+def update_email_queue_after_send(queue_id,status,provider_id='',error='',db_path=DB_PATH):
+    note=json.dumps({'provider_id':provider_id,'error':error},ensure_ascii=True)
+    with connect(db_path) as c:
+        c.execute('UPDATE email_queue SET status=?, updated_at=?, song_context_json=CASE WHEN ?!="" THEN ? ELSE song_context_json END WHERE id=?',(status,now(),note,note,queue_id))
+        c.commit()
 def get_email_queue(status=None,db_path=DB_PATH):
-    sql="""SELECT q.*, c.display_name AS curator_name, p.name AS playlist_name, p.url AS playlist_url
+    sql="""SELECT q.*, c.display_name AS curator_name, p.name AS playlist_name, p.url AS playlist_url,
+                  oc.name AS campaign_name, oc.song_id AS campaign_song_id
            FROM email_queue q
            LEFT JOIN curators c ON q.curator_id=c.id
-           LEFT JOIN playlists p ON q.playlist_id=p.id"""
+           LEFT JOIN playlists p ON q.playlist_id=p.id
+           LEFT JOIN outreach_campaigns oc ON q.campaign_id=oc.id"""
     args=()
     if status: sql+=' WHERE q.status=?'; args=(status,)
     sql+=' ORDER BY q.created_at DESC'
     with connect(db_path) as c: rows=c.execute(sql,args).fetchall()
+    return [dict(r) for r in rows]
+
+def create_outreach_campaign(song_id,name,subject_template,body_template,specifications=None,status='draft',db_path=DB_PATH):
+    clean_name=(name or 'Untitled Campaign').strip() or 'Untitled Campaign'
+    with connect(db_path) as c:
+        cur=c.execute("""INSERT INTO outreach_campaigns (song_id,name,status,subject_template,body_template,specifications_json,created_at,updated_at)
+                         VALUES (?,?,?,?,?,?,?,?)""",
+                      (int(song_id or 0),clean_name,status,subject_template or '',body_template or '',json.dumps(specifications or {},ensure_ascii=True),now(),now()))
+        c.commit()
+        return int(cur.lastrowid)
+
+def update_outreach_campaign(campaign_id,name=None,subject_template=None,body_template=None,specifications=None,status=None,db_path=DB_PATH):
+    with connect(db_path) as c:
+        row=c.execute('SELECT * FROM outreach_campaigns WHERE id=?',(int(campaign_id),)).fetchone()
+        if not row: return 0
+        c.execute("""UPDATE outreach_campaigns
+                     SET name=?,subject_template=?,body_template=?,specifications_json=?,status=?,updated_at=?
+                     WHERE id=?""",
+                  ((name if name is not None else row['name']),
+                   (subject_template if subject_template is not None else row['subject_template']),
+                   (body_template if body_template is not None else row['body_template']),
+                   json.dumps(specifications,ensure_ascii=True) if specifications is not None else (row['specifications_json'] or '{}'),
+                   (status if status is not None else row['status']),now(),int(campaign_id)))
+        c.commit()
+        return int(campaign_id)
+
+def get_outreach_campaigns(db_path=DB_PATH):
+    with connect(db_path) as c:
+        rows=c.execute("""SELECT oc.*,s.title AS song_title,s.artist_name,
+                          (SELECT COUNT(*) FROM email_queue q WHERE q.campaign_id=oc.id) AS email_count,
+                          (SELECT COUNT(*) FROM email_queue q WHERE q.campaign_id=oc.id AND q.status='sent') AS sent_count,
+                          (SELECT COUNT(*) FROM email_queue q WHERE q.campaign_id=oc.id AND q.status='approved') AS approved_count
+                          FROM outreach_campaigns oc
+                          LEFT JOIN songs s ON s.id=oc.song_id
+                          ORDER BY oc.updated_at DESC,oc.id DESC""").fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row)
+        try: item['specifications']=json.loads(item.get('specifications_json') or '{}')
+        except json.JSONDecodeError: item['specifications']={}
+        result.append(item)
+    return result
+
+def save_outreach_campaign_targets(campaign_id,rows,db_path=DB_PATH):
+    saved=0
+    with connect(db_path) as c:
+        for row in rows or []:
+            raw=row.get('raw') if isinstance(row.get('raw'),dict) else {}
+            playlist_id=int(row.get('playlist_id') or raw.get('playlist_id') or row.get('id') or 0)
+            if not playlist_id: continue
+            c.execute("""INSERT INTO outreach_campaign_targets (campaign_id,playlist_id,fit_score,reason,email_status,instagram_status,submission_status,created_at,updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(campaign_id,playlist_id) DO UPDATE SET fit_score=excluded.fit_score,reason=excluded.reason,updated_at=excluded.updated_at""",
+                      (int(campaign_id),playlist_id,float(row.get('fit_score') or row.get('relevance_score') or row.get('final_score') or 0),row.get('reason') or '',
+                       'pending' if row.get('email') else 'unavailable','pending' if row.get('instagram') else 'unavailable','pending' if row.get('submission_page') else 'unavailable',now(),now()))
+            saved+=1
+        c.commit()
+    return saved
+
+def get_outreach_campaign_targets(campaign_id,db_path=DB_PATH):
+    with connect(db_path) as c:
+        rows=c.execute("""SELECT ct.*,p.name AS playlist_name,p.url AS playlist_url,p.followers,p.curator_id,c.display_name AS curator_name,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS email,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS instagram,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS submission_page
+                  FROM outreach_campaign_targets ct
+                  JOIN playlists p ON p.id=ct.playlist_id
+                  LEFT JOIN curators c ON c.id=p.curator_id
+                  WHERE ct.campaign_id=?
+                  ORDER BY ct.fit_score DESC,p.name""",(int(campaign_id),)).fetchall()
+    return [dict(row) for row in rows]
+
+def update_outreach_campaign_target_status(campaign_id,playlist_id,channel,status='done',db_path=DB_PATH):
+    columns={'email':'email_status','instagram':'instagram_status','submission':'submission_status'}
+    column=columns.get(channel)
+    if not column: return 0
+    with connect(db_path) as c:
+        cur=c.execute(f'UPDATE outreach_campaign_targets SET {column}=?,updated_at=? WHERE campaign_id=? AND playlist_id=?',(status,now(),int(campaign_id),int(playlist_id)))
+        c.commit()
+        return cur.rowcount
+def upsert_email_reply(reply,db_path=DB_PATH):
+    if not reply.get('gmail_message_id'): return 0
+    with connect(db_path) as c:
+        c.execute("""INSERT INTO email_replies (gmail_message_id,gmail_thread_id,email_queue_id,curator_id,playlist_id,from_email,from_name,subject,snippet,received_at,match_status,created_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(gmail_message_id) DO UPDATE SET
+                     gmail_thread_id=excluded.gmail_thread_id,
+                     email_queue_id=excluded.email_queue_id,
+                     curator_id=excluded.curator_id,
+                     playlist_id=excluded.playlist_id,
+                     from_email=excluded.from_email,
+                     from_name=excluded.from_name,
+                     subject=excluded.subject,
+                     snippet=excluded.snippet,
+                     received_at=excluded.received_at,
+                     match_status=excluded.match_status""",
+                  (reply.get('gmail_message_id',''),reply.get('gmail_thread_id',''),int(reply.get('email_queue_id') or 0),int(reply.get('curator_id') or 0),int(reply.get('playlist_id') or 0),reply.get('from_email',''),reply.get('from_name',''),reply.get('subject',''),reply.get('snippet',''),reply.get('received_at',''),reply.get('match_status','unmatched'),now()))
+        row=c.execute('SELECT id FROM email_replies WHERE gmail_message_id=?',(reply.get('gmail_message_id',''),)).fetchone()
+        c.commit()
+        return int(row['id']) if row else 0
+def get_email_replies(db_path=DB_PATH):
+    sql="""SELECT r.*, q.to_email, q.song_title, q.campaign_id, oc.name AS campaign_name,
+                  p.name AS playlist_name, p.url AS playlist_url, c.display_name AS curator_name
+           FROM email_replies r
+           LEFT JOIN email_queue q ON r.email_queue_id=q.id
+           LEFT JOIN playlists p ON r.playlist_id=p.id
+           LEFT JOIN curators c ON r.curator_id=c.id
+           LEFT JOIN outreach_campaigns oc ON q.campaign_id=oc.id
+           ORDER BY r.received_at DESC, r.created_at DESC"""
+    with connect(db_path) as c:
+        rows=c.execute(sql).fetchall()
     return [dict(r) for r in rows]
 def get_playlist_scoring_context(db_path=DB_PATH):
     with connect(db_path) as c:
@@ -140,8 +281,63 @@ def save_song_fit_targets(song,matches,db_path=DB_PATH):
     return saved
 def get_song_fit_targets(db_path=DB_PATH):
     with connect(db_path) as c:
-        rows=c.execute('SELECT * FROM song_fit_targets ORDER BY created_at DESC, fit_score DESC').fetchall()
-    return [dict(r) for r in rows]
+        legacy=[dict(r) for r in c.execute('SELECT * FROM song_fit_targets ORDER BY created_at DESC, fit_score DESC').fetchall()]
+        catalog=[dict(r) for r in c.execute("""SELECT spt.id,spt.song_id,s.title AS song_title,s.artist_name,
+                         spt.playlist_name,spt.playlist_url,p.curator_id,c.display_name AS curator_name,
+                         spt.fit_score,spt.status,spt.notes,spt.created_at
+                  FROM song_playlist_targets spt
+                  LEFT JOIN songs s ON s.id=spt.song_id
+                  LEFT JOIN playlists p ON p.url=spt.playlist_url
+                  LEFT JOIN curators c ON c.id=p.curator_id
+                  ORDER BY spt.created_at DESC, spt.fit_score DESC""").fetchall()]
+    seen=set()
+    merged=[]
+    for row in catalog+legacy:
+        key=(int(row.get('song_id') or 0),str(row.get('song_title') or '').strip().lower(),str(row.get('artist_name') or '').strip().lower(),row.get('playlist_url') or '')
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+def save_song_playlist_target(song_id,playlist,source='manual',fit_score=0,status='target',notes='',db_path=DB_PATH):
+    playlist_url=playlist.get('playlist_url') or playlist.get('url') or ''
+    playlist_name=playlist.get('playlist_name') or playlist.get('name') or ''
+    if not int(song_id or 0) or not playlist_url:
+        return 0
+    raw=playlist.get('raw_json') or playlist.get('raw') or {}
+    if not isinstance(raw,str):
+        raw=json.dumps(raw,ensure_ascii=True)
+    with connect(db_path) as c:
+        cur=c.execute("""INSERT INTO song_playlist_targets
+                         (song_id,playlist_name,playlist_url,fit_score,status,notes,created_at,source,related_artists,raw_json,updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(song_id,playlist_url) DO UPDATE SET
+                         playlist_name=excluded.playlist_name,
+                         fit_score=max(song_playlist_targets.fit_score,excluded.fit_score),
+                         status=excluded.status,
+                         notes=excluded.notes,
+                         source=excluded.source,
+                         related_artists=excluded.related_artists,
+                         raw_json=excluded.raw_json,
+                         updated_at=excluded.updated_at""",
+                      (int(song_id),playlist_name,playlist_url,float(fit_score or playlist.get('fit_score') or playlist.get('candidate_fit_score') or 0),status,notes or playlist.get('notes',''),now(),source,playlist.get('related_artists',''),raw,now()))
+        row=c.execute('SELECT id FROM song_playlist_targets WHERE song_id=? AND playlist_url=?',(int(song_id),playlist_url)).fetchone()
+        c.commit()
+        return int(row['id']) if row else int(cur.lastrowid)
+
+def import_song_seed_playlists(song_id,playlists,source='cyanite_seed',db_path=DB_PATH):
+    saved=[]
+    seen=set()
+    for playlist in playlists or []:
+        url=playlist.get('playlist_url') or playlist.get('url') or ''
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        playlist_id=upsert_playlist(playlist,db_path)
+        target_id=save_song_playlist_target(song_id,playlist,source=source,fit_score=playlist.get('fit_score') or playlist.get('candidate_fit_score') or 85,status='target',notes=f'Imported from {source}',db_path=db_path)
+        saved.append({'playlist_id':playlist_id,'target_id':target_id,'playlist_url':url,'playlist_name':playlist.get('playlist_name') or playlist.get('name') or ''})
+    return saved
 def get_curator_profiles(db_path=DB_PATH):
     with connect(db_path) as c:
         curators=[dict(r) for r in c.execute('SELECT * FROM curators ORDER BY display_name').fetchall()]
@@ -152,7 +348,18 @@ def get_curator_profiles(db_path=DB_PATH):
     return curators
 def get_all_playlists(db_path=DB_PATH):
     with connect(db_path) as c:
-        rows=c.execute('SELECT p.*, c.display_name AS curator_name FROM playlists p LEFT JOIN curators c ON p.curator_id=c.id ORDER BY p.final_score DESC').fetchall()
+        rows=c.execute("""SELECT p.*, c.display_name AS curator_name,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_page,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='website' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS website,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='link_hub' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS link_hub
+           FROM playlists p
+           LEFT JOIN curators c ON p.curator_id=c.id
+           ORDER BY p.final_score DESC""").fetchall()
     return [dict(r) for r in rows]
 
 def create_mining_job(profile,target,source='chartmetric',status='planned',db_path=DB_PATH):
@@ -174,14 +381,84 @@ def update_mining_job(job_id,status=None,query_count=None,result_count=None,erro
                    now(),int(job_id)))
         c.commit(); return int(job_id)
 
+def get_mining_job(job_id,db_path=DB_PATH):
+    with connect(db_path) as c:
+        row=c.execute('SELECT * FROM mining_jobs WHERE id=?',(int(job_id),)).fetchone()
+    return dict(row) if row else {}
+
+def plan_mining_query_runs(job_id,queries,source='chartmetric',db_path=DB_PATH):
+    planned=0
+    with connect(db_path) as c:
+        for item in queries or []:
+            query_type=item.get('type') or item.get('query_type') or 'query'
+            query=' '.join(str(item.get('query') or '').split())
+            if not query: continue
+            cur=c.execute("""INSERT OR IGNORE INTO mining_query_runs (mining_job_id,source,query_type,query,status,request_count,result_count,saved_count,filtered_count,error,raw_response_json,updated_at)
+                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          (int(job_id),source,query_type,query,'planned',0,0,0,0,'','',now()))
+            planned+=cur.rowcount
+        c.commit()
+    return planned
+
+def get_mining_query_runs(job_id,statuses=None,db_path=DB_PATH):
+    args=[int(job_id)]
+    sql='SELECT * FROM mining_query_runs WHERE mining_job_id=?'
+    if statuses:
+        marks=','.join(['?']*len(statuses))
+        sql+=f' AND status IN ({marks})'
+        args.extend(statuses)
+    sql+=' ORDER BY id'
+    with connect(db_path) as c:
+        rows=c.execute(sql,args).fetchall()
+    return [dict(r) for r in rows]
+
+def update_mining_query_run(query_run_id,status=None,request_count=None,result_count=None,saved_count=None,filtered_count=None,error=None,raw_response=None,started=False,completed=False,db_path=DB_PATH):
+    with connect(db_path) as c:
+        current=c.execute('SELECT * FROM mining_query_runs WHERE id=?',(int(query_run_id),)).fetchone()
+        if not current: return 0
+        raw=current['raw_response_json'] or ''
+        if raw_response is not None:
+            raw=raw_response if isinstance(raw_response,str) else json.dumps(raw_response,ensure_ascii=True)
+        c.execute("""UPDATE mining_query_runs
+                     SET status=?,request_count=?,result_count=?,saved_count=?,filtered_count=?,error=?,raw_response_json=?,
+                         started_at=CASE WHEN ? THEN COALESCE(started_at,?) ELSE started_at END,
+                         completed_at=CASE WHEN ? THEN ? ELSE completed_at END,
+                         updated_at=?
+                     WHERE id=?""",
+                  (status if status is not None else current['status'],
+                   int(request_count if request_count is not None else current['request_count'] or 0),
+                   int(result_count if result_count is not None else current['result_count'] or 0),
+                   int(saved_count if saved_count is not None else current['saved_count'] or 0),
+                   int(filtered_count if filtered_count is not None else current['filtered_count'] or 0),
+                   error if error is not None else current['error'],
+                   raw,1 if started else 0,now(),1 if completed else 0,now(),now(),int(query_run_id)))
+        c.commit(); return int(query_run_id)
+
+def log_api_usage_event(source,operation,query='',status_code=0,request_count=1,credits_used=0,remaining_credits=None,rate_limited=False,error='',db_path=DB_PATH):
+    with connect(db_path) as c:
+        cur=c.execute("""INSERT INTO api_usage_events (source,operation,query,status_code,request_count,credits_used,remaining_credits,rate_limited,error,created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                      (source,operation,query,int(status_code or 0),int(request_count or 0),int(credits_used or 0),remaining_credits,1 if rate_limited else 0,error or '',now()))
+        c.commit(); return int(cur.lastrowid)
+
+def get_api_usage_events(source=None,db_path=DB_PATH):
+    args=()
+    sql='SELECT * FROM api_usage_events'
+    if source:
+        sql+=' WHERE source=?'; args=(source,)
+    sql+=' ORDER BY created_at DESC,id DESC'
+    with connect(db_path) as c:
+        rows=c.execute(sql,args).fetchall()
+    return [dict(r) for r in rows]
+
 def save_mined_playlist(job_id,playlist,db_path=DB_PATH):
     if not playlist.get('playlist_url') and not playlist.get('chartmetric_playlist_id'): return 0
     raw=playlist.get('raw_json') or playlist.get('raw') or {}
     if not isinstance(raw,str): raw=json.dumps(raw,ensure_ascii=True)
     with connect(db_path) as c:
-        cur=c.execute("""INSERT OR IGNORE INTO mined_playlists (mining_job_id,source,query,playlist_name,playlist_url,curator_name,follower_count,spotify_description,last_updated,chartmetric_playlist_id,raw_json,status,created_at)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                      (int(job_id),playlist.get('source','chartmetric'),playlist.get('search_query') or playlist.get('query',''),playlist.get('playlist_name',''),playlist.get('playlist_url',''),playlist.get('curator_name',''),int(playlist.get('follower_count') or 0),playlist.get('spotify_description',''),playlist.get('last_updated',''),playlist.get('chartmetric_playlist_id',''),raw,playlist.get('status','mined'),now()))
+        cur=c.execute("""INSERT OR IGNORE INTO mined_playlists (mining_job_id,source,query,playlist_name,playlist_url,curator_name,follower_count,spotify_description,last_updated,chartmetric_playlist_id,raw_json,status,created_at,fit_score,fit_reason,best_song_titles,follower_tier,matched_terms)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (int(job_id),playlist.get('source','chartmetric'),playlist.get('search_query') or playlist.get('query',''),playlist.get('playlist_name',''),playlist.get('playlist_url',''),playlist.get('curator_name',''),int(playlist.get('follower_count') or 0),playlist.get('spotify_description',''),playlist.get('last_updated',''),playlist.get('chartmetric_playlist_id',''),raw,playlist.get('status','mined'),now(),float(playlist.get('fit_score') or 0),playlist.get('fit_reason',''),playlist.get('best_song_titles',''),playlist.get('follower_tier',''),playlist.get('matched_terms','')))
         c.commit(); return int(cur.lastrowid) if cur.rowcount else 0
 
 def bulk_save_mined_playlists(job_id,playlists,db_path=DB_PATH):

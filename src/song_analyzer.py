@@ -73,6 +73,29 @@ DISCOVERY_INTENT_TERMS = [
     "discover weekly",
 ]
 
+SUBMISSION_READY_TERMS = [
+    "submit",
+    "submissions",
+    "submission",
+    "send your music",
+    "send music",
+    "submit music",
+    "for submissions",
+    "playlist submission",
+    "dm submissions",
+]
+
+CURATOR_IDENTITY_TERMS = [
+    "curated by",
+    "curator",
+    "blog",
+    "radio",
+    "records",
+    "collective",
+    "magazine",
+    "label",
+]
+
 THROWBACK_TERMS = [
     "throwback",
     "old school",
@@ -86,6 +109,20 @@ THROWBACK_TERMS = [
     "80s",
     "70s",
     "60s",
+]
+
+PASSIVE_CONTEXT_TERMS = [
+    "background",
+    "study",
+    "sleep",
+    "focus",
+    "coffee shop",
+    "dinner",
+    "relaxing music",
+    "hits",
+    "top hits",
+    "viral hits",
+    "best songs",
 ]
 
 
@@ -194,15 +231,57 @@ def throwback_context_hits(text: str) -> List[str]:
     return [term for term in THROWBACK_TERMS if term in hay]
 
 
+def submission_ready_hits(text: str) -> List[str]:
+    hay = (text or "").lower()
+    return [term for term in SUBMISSION_READY_TERMS if term in hay]
+
+
+def curator_identity_hits(text: str) -> List[str]:
+    hay = (text or "").lower()
+    return [term for term in CURATOR_IDENTITY_TERMS if term in hay]
+
+
+def passive_context_hits(text: str) -> List[str]:
+    hay = (text or "").lower()
+    return [term for term in PASSIVE_CONTEXT_TERMS if term in hay]
+
+
+def playlist_targeting_profile(text: str) -> Dict:
+    hay = text or ""
+    discovery_hits = discovery_intent_hits(hay)
+    submission_hits = submission_ready_hits(hay)
+    curator_hits = curator_identity_hits(hay)
+    throwback_hits = throwback_context_hits(hay)
+    passive_hits = passive_context_hits(hay)
+    quality_score = len(discovery_hits) * 16 + len(submission_hits) * 14 + len(curator_hits) * 8
+    risk_score = len(throwback_hits) * 22 + len(passive_hits) * 10
+    return {
+        "discovery_intent_hits": discovery_hits,
+        "submission_ready_hits": submission_hits,
+        "curator_identity_hits": curator_hits,
+        "throwback_context_hits": throwback_hits,
+        "passive_context_hits": passive_hits,
+        "curator_target_score": max(-60, min(60, quality_score - risk_score)),
+    }
+
+
 def _playlist_match_score(profile_text: str, references: List[str], playlist: Dict, lane_names: List[str], release=None) -> Dict:
     release = release or {}
     hay = " ".join(str(playlist.get(k, "")) for k in ["name", "related_artists", "spotify_description", "curator_name"]).lower()
     shared_refs = [r for r in references if r.lower() and r.lower() in hay]
     lane_hits = [lane for lane in lane_names if any(part in hay for part in lane.lower().split(" / "))]
     descriptor_hits = [term for term in split_terms(profile_text) if len(term) > 3 and term.lower() in hay]
-    discovery_hits = discovery_intent_hits(hay)
-    throwback_hits = throwback_context_hits(hay)
-    base = min(100, len(shared_refs) * 24 + len(lane_hits) * 18 + len(descriptor_hits) * 8 + len(discovery_hits) * 12)
+    targeting = playlist_targeting_profile(hay)
+    discovery_hits = targeting["discovery_intent_hits"]
+    throwback_hits = targeting["throwback_context_hits"]
+    base = min(
+        100,
+        len(shared_refs) * 24
+        + len(lane_hits) * 18
+        + len(descriptor_hits) * 8
+        + len(discovery_hits) * 12
+        + targeting["curator_target_score"],
+    )
     excluded = release.get("exclude_new_release_playlists") and is_new_release_context(hay)
     if excluded:
         base = 0
@@ -220,6 +299,10 @@ def _playlist_match_score(profile_text: str, references: List[str], playlist: Di
         "matched_descriptors": descriptor_hits[:8],
         "discovery_intent_hits": discovery_hits,
         "throwback_context_hits": throwback_hits,
+        "submission_ready_hits": targeting["submission_ready_hits"],
+        "curator_identity_hits": targeting["curator_identity_hits"],
+        "passive_context_hits": targeting["passive_context_hits"],
+        "curator_target_score": targeting["curator_target_score"],
     }
 
 
@@ -232,6 +315,14 @@ def merge_song_metadata(title="", artist="", reference_artists="", descriptors="
         "descriptors": "; ".join([x for x in [descriptors, spotify_track.get("descriptors", ""), spotify_track.get("album", "")] if x]),
     }
     return merged
+
+
+def preferred_catalog_title(uploaded_title="", analysis_title="", spotify_track=None, release_status="unreleased"):
+    spotify_track = spotify_track or {}
+    spotify_title = str(spotify_track.get("title") or "").strip()
+    if str(release_status or "").lower() in {"released", "already_released"} and spotify_title:
+        return spotify_title
+    return str(analysis_title or uploaded_title or spotify_title or "").strip()
 
 
 def merge_reference_track_profile(reference_tracks: List[Dict]) -> Dict:
@@ -373,7 +464,7 @@ def discovery_searches(top_lanes, song, release=None):
         audio_core = audio_terms[:4] + lane_terms[:1]
         if release.get("exclude_new_release_playlists"):
             audio_core.append("evergreen")
-        for intent in ["emerging artists", "independent artists"]:
+        for intent in ["emerging artists", "independent artists", "playlist submissions", "submit music"]:
             query_terms = audio_core + [intent, "playlist"]
             query = " ".join(query_terms[:8]).strip()
             if query:
@@ -506,10 +597,13 @@ def score_spotify_playlist_candidates(song_fit: Dict, candidates: List[Dict], ex
         if match.get("throwback_context_hits") and not match.get("discovery_intent_hits"):
             continue
         follower_count = int(candidate.get("follower_count") or 0)
-        follower_bonus = 10 if 500 <= follower_count <= 100000 else 4 if follower_count > 0 else 0
+        follower_bonus = 10 if 500 <= follower_count <= 75000 else 5 if 75_000 < follower_count <= 150_000 else 4 if follower_count > 0 else 0
         query_bonus = 8 if candidate.get("search_query") else 0
         discovery_bonus = 10 if match.get("discovery_intent_hits") else 0
-        fit_score = min(100, match.get("fit_score", 0) + follower_bonus + query_bonus + discovery_bonus)
+        submission_bonus = 10 if match.get("submission_ready_hits") else 0
+        identity_bonus = 5 if match.get("curator_identity_hits") else 0
+        passive_penalty = min(20, len(match.get("passive_context_hits") or []) * 8)
+        fit_score = min(100, max(0, match.get("fit_score", 0) + follower_bonus + query_bonus + discovery_bonus + submission_bonus + identity_bonus - passive_penalty))
         scored.append(
             {
                 **candidate,
@@ -520,6 +614,10 @@ def score_spotify_playlist_candidates(song_fit: Dict, candidates: List[Dict], ex
                 "matched_descriptors": match.get("matched_descriptors", []),
                 "discovery_intent_hits": match.get("discovery_intent_hits", []),
                 "throwback_context_hits": match.get("throwback_context_hits", []),
+                "submission_ready_hits": match.get("submission_ready_hits", []),
+                "curator_identity_hits": match.get("curator_identity_hits", []),
+                "passive_context_hits": match.get("passive_context_hits", []),
+                "curator_target_score": match.get("curator_target_score", 0),
                 "excluded_for_release_age": False,
             }
         )

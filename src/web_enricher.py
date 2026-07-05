@@ -6,6 +6,10 @@ from bs4 import BeautifulSoup
 from src.submithub import is_submithub_url, submithub_signal_from_methods
 EMAIL_RE=re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}',re.I)
 HEADERS={'User-Agent':'Mozilla/5.0 streambase/0.4'}
+BLOCKED_EMAIL_DOMAINS={'duckduckgo.com','google.com','bing.com','yahoo.com','spotify.com','example.com','domain.com'}
+BLOCKED_EMAIL_VALUES={'error-lite@duckduckgo.com'}
+GENERIC_CONTACT_DOMAINS={'droptrack.com','artist.tools','submitlink.io','playlistlookup.com','playlistscout.com','soundcamps.com','submithub.com','oktiv.io','reddit.com','playlistsupply.com'}
+GENERIC_CONTACT_VALUES={'https://www.instagram.com/droptrack/','https://www.instagram.com/hausersmusic/','https://www.instagram.com/playlistcuratorsubmission/'}
 def safe_get(url,timeout=8):
     try:
         r=requests.get(url,headers=HEADERS,timeout=timeout)
@@ -56,6 +60,27 @@ def looks_submit(url,text=''):
     hay=f'{url} {text}'.lower()
     return any(k in hay for k in ['submit','submission','playlist submission','music submission','submithub','groover','toneden','hypeddit','daily playlists','send your music'])
 def method(t,v,src,conf): return {'type':t,'value':v,'source_url':src,'confidence_score':max(0,min(100,int(conf))),'status':'new'}
+def generic_contact_result(value,source=''):
+    low_value=(value or '').strip().lower()
+    low_source=(source or '').strip().lower()
+    if low_value in GENERIC_CONTACT_VALUES:
+        return True
+    if low_value.startswith('/'):
+        return True
+    return any(domain in low_value or domain in low_source for domain in GENERIC_CONTACT_DOMAINS)
+def valid_contact_email(email,source=''):
+    value=(email or '').strip().lower()
+    if not value or value in BLOCKED_EMAIL_VALUES or '@' not in value:
+        return False
+    domain=value.rsplit('@',1)[-1]
+    if domain in BLOCKED_EMAIL_DOMAINS:
+        return False
+    if any(part in value for part in ['noreply','no-reply','donotreply','do-not-reply','privacy@','abuse@','postmaster@','webmaster@']):
+        return False
+    low_source=(source or '').lower()
+    if 'duckduckgo' in low_source and domain in BLOCKED_EMAIL_DOMAINS:
+        return False
+    return True
 def score_contact_method(t,v,src,base):
     low=f'{v} {src}'.lower(); score=base
     if t=='email':
@@ -78,6 +103,8 @@ def enrich_contact_info(playlist_name,curator_name='',playlist_url=''):
     methods=[]; seen=set()
     def add(t,v,src,conf):
         if not v or (t,v) in seen: return
+        if generic_contact_result(v,src): return
+        if t=='email' and not valid_contact_email(v,src): return
         seen.add((t,v)); methods.append(method(t,v,src,score_contact_method(t,v,src,conf)))
     for email in EMAIL_RE.findall(text): add('email',email,'duckduckgo_search',75)
     for link in links:

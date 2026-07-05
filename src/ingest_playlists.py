@@ -32,7 +32,17 @@ def normalize_rows(rows):
     out=[normalize_row(r) for r in rows]
     return [r for r in out if r['playlist_name'] or r['playlist_url']]
 def load_playlists_from_text(txt): return normalize_rows(list(csv.DictReader(StringIO(txt))))
+def extract_spotify_playlist_links(raw):
+    text=raw or ''
+    links=[]
+    for match in re.finditer(r'https?://open\.spotify\.com/playlist/[A-Za-z0-9]+(?:\?[^ \n\r\t<]*)?',text):
+        links.append(match.group(0).split('?')[0])
+    for match in re.finditer(r'spotify:playlist:([A-Za-z0-9]+)',text):
+        links.append(f"https://open.spotify.com/playlist/{match.group(1)}")
+    if not links:
+        links=[line.strip() for line in text.splitlines() if line.strip()]
+    return list(dict.fromkeys(links))
 def playlists_from_links(raw):
-    return [{'playlist_name':'','playlist_url':u.strip(),'follower_count':0,'curator_name':'','related_artists':'','last_updated':'','spotify_description':''} for u in raw.splitlines() if u.strip()]
+    return [{'playlist_name':'','playlist_url':u,'follower_count':0,'curator_name':'','related_artists':'','last_updated':'','spotify_description':''} for u in extract_spotify_playlist_links(raw)]
 def save_raw_json(playlists, output_path=None):
     p=Path(output_path) if output_path else local_data_path('playlists_raw.json'); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(playlists,indent=2),encoding='utf-8')

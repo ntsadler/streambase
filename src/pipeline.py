@@ -29,6 +29,34 @@ def normalize_song_context(value):
             if isinstance(parsed, dict):
                 return parsed
     return {}
+def _num(value, default=0.0):
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+def _nonempty_list(value):
+    return value if isinstance(value, list) else []
+def apply_discovery_targeting_score(scored, playlist):
+    candidate_fit=_num(playlist.get('candidate_fit_score'))
+    curator_target=_num(playlist.get('curator_target_score'))
+    if not candidate_fit and not curator_target:
+        return scored
+    original=_num(scored.get('final_score'))
+    target_adjusted=max(0,min(100,candidate_fit+(curator_target*.2)))
+    final=max(original,target_adjusted)
+    evidence=list(scored.get('evidence') or [])
+    if _nonempty_list(playlist.get('discovery_intent_hits')):
+        evidence.append('emerging artist discovery intent')
+    if _nonempty_list(playlist.get('submission_ready_hits')):
+        evidence.append('submission-friendly playlist language')
+    if _nonempty_list(playlist.get('curator_identity_hits')):
+        evidence.append('curator identity signal')
+    if _nonempty_list(playlist.get('passive_context_hits')):
+        evidence.append('passive context warning')
+    scored={**scored,'final_score':round(final,2),'evidence':list(dict.fromkeys(evidence))}
+    scored['priority']='strong fit' if final>=80 and scored.get('confidence_score',0)>=35 else scored.get('priority')
+    scored['breakdown']={**(scored.get('breakdown') or {}),'song_specific_playlist_fit':round(candidate_fit,2),'curator_target_score':round(curator_target,2)}
+    return scored
 def process_playlists(playlists, do_web_enrichment=True, do_spotify_api=False, queue_email_approval=True, song_context=None, playlist_cooldown_days=30, minimum_queue_score=50):
     init_db(); processed=[]; related=Counter(); existing=get_playlist_scoring_context()
     for playlist in playlists:
@@ -42,7 +70,7 @@ def process_playlists(playlists, do_web_enrichment=True, do_spotify_api=False, q
         if contact.get('curator_name_found') and not playlist.get('curator_name'): playlist['curator_name']=contact['curator_name_found']
         if contact.get('spotify_description') and not playlist.get('spotify_description'): playlist['spotify_description']=contact['spotify_description']
         active_song_context=normalize_song_context(song_context or playlist.get('song_context') or {})
-        sim=compute_similarity(playlist); ix=compute_intersection_score(playlist,existing); scored=score_playlist(sim['similarity_score'],playlist.get('follower_count',0),playlist.get('last_updated',''),contact,ix['intersection_score']); msg=generate_outreach(playlist,sim,active_song_context)
+        sim=compute_similarity(playlist); ix=compute_intersection_score(playlist,existing); scored=score_playlist(sim['similarity_score'],playlist.get('follower_count',0),playlist.get('last_updated',''),contact,ix['intersection_score']); scored=apply_discovery_targeting_score(scored,playlist); msg=generate_outreach(playlist,sim,active_song_context)
         notes=json.dumps({'score_breakdown':scored['breakdown'],'confidence_score':scored.get('confidence_score',0),'evidence':scored.get('evidence',[]),'intersection':ix,'submithub_verified':contact.get('submithub_verified',False),'submithub_url':contact.get('submithub_url','')},ensure_ascii=True)
         rec={**playlist,'similarity_score':sim['similarity_score'],'intersection_score':ix['intersection_score'],'intersection_breakdown':ix,'similarity_breakdown':sim['breakdown'],'final_score':scored['final_score'],'priority':scored['priority'],'rating_confidence':scored.get('confidence_score',0),'rating_evidence':scored.get('evidence',[]),'email':contact.get('email'),'instagram':contact.get('instagram'),'website':contact.get('website'),'submission_page':contact.get('submission_page'),'link_hub':contact.get('link_hub'),'submithub_verified':contact.get('submithub_verified',False),'submithub_url':contact.get('submithub_url',''),'submithub_confidence':contact.get('submithub_confidence',0),'contact_confidence':contact.get('confidence_score',0),'contact_methods':contact.get('contact_methods',[]),**msg}
         cid=get_or_create_curator(rec.get('curator_name') or 'Unknown Curator')

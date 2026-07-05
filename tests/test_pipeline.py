@@ -1,6 +1,6 @@
 import unittest
 
-from src.pipeline import normalize_song_context
+from src.pipeline import apply_discovery_targeting_score, normalize_song_context
 
 
 class PipelineTests(unittest.TestCase):
@@ -19,6 +19,27 @@ class PipelineTests(unittest.TestCase):
 
     def test_normalize_song_context_ignores_plain_text(self):
         self.assertEqual(normalize_song_context("Song"), {})
+
+    def test_apply_discovery_targeting_score_lifts_song_specific_fit(self):
+        scored = {
+            "final_score": 42,
+            "priority": "weak fit",
+            "confidence_score": 45,
+            "evidence": ["contact path"],
+            "breakdown": {"contactability": 75},
+        }
+        playlist = {
+            "candidate_fit_score": 88,
+            "curator_target_score": 30,
+            "discovery_intent_hits": ["emerging artists"],
+            "submission_ready_hits": ["submit music"],
+        }
+
+        result = apply_discovery_targeting_score(scored, playlist)
+
+        self.assertGreater(result["final_score"], 65)
+        self.assertEqual(result["priority"], "strong fit")
+        self.assertIn("emerging artist discovery intent", result["evidence"])
 
 
 if __name__ == "__main__":

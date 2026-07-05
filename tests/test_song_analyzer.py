@@ -1,10 +1,28 @@
 import unittest
 
 from src.playlist_discovery import artist_playlist_searches, discover_catalog_song_playlists, discover_released_track_playlists
-from src.song_analyzer import analyze_song_fit, score_spotify_playlist_candidates, suggest_reference_song_searches
+from src.song_analyzer import analyze_song_fit, preferred_catalog_title, score_spotify_playlist_candidates, suggest_reference_song_searches
 
 
 class SongAnalyzerTests(unittest.TestCase):
+    def test_released_song_prefers_spotify_title_over_uploaded_file(self):
+        title = preferred_catalog_title(
+            "rough_mix_v7",
+            "rough_mix_v7",
+            {"title": "Hideout In The District"},
+            "released",
+        )
+        self.assertEqual(title, "Hideout In The District")
+
+    def test_unreleased_song_keeps_analysis_title(self):
+        title = preferred_catalog_title(
+            "rough_mix_v7",
+            "Cyanite Upload Title",
+            {"title": "Spotify Title"},
+            "unreleased",
+        )
+        self.assertEqual(title, "Cyanite Upload Title")
+
     def test_song_fit_recommends_matching_lane_from_spotify_metadata(self):
         meta = {
             "title": "Night Drive",
@@ -55,7 +73,7 @@ class SongAnalyzerTests(unittest.TestCase):
         self.assertEqual([m["playlist_name"] for m in result["saved_playlist_matches"]], ["Indie Dance Classics"])
         self.assertTrue(all("evergreen" in s["search_query"] for s in result["discovery_searches"]))
         self.assertTrue(all("curator" not in s["search_query"].lower() for s in result["discovery_searches"]))
-        self.assertTrue(all("submission" not in s["search_query"].lower() for s in result["discovery_searches"]))
+        self.assertTrue(any("submission" in s["search_query"].lower() for s in result["discovery_searches"]))
 
     def test_no_release_date_does_not_exclude_new_release_context(self):
         meta = {
@@ -173,7 +191,7 @@ class SongAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["cyanite_summary"]["source"], "cyanite")
         self.assertTrue(any("bedroom pop" in s["search_query"] for s in result["discovery_searches"]))
         self.assertFalse(any("curator" in s["search_query"].lower() for s in result["discovery_searches"]))
-        self.assertFalse(any("submission" in s["search_query"].lower() for s in result["discovery_searches"]))
+        self.assertTrue(any("submission" in s["search_query"].lower() for s in result["discovery_searches"]))
 
     def test_specific_cyanite_fields_feed_search_and_scoring(self):
         meta = {
@@ -223,6 +241,43 @@ class SongAnalyzerTests(unittest.TestCase):
         self.assertTrue(any("Clairo" in query for query in queries))
         self.assertTrue(any("bedroom pop" in query for query in queries))
         self.assertTrue(any("chill" in query for query in queries))
+
+    def test_submission_friendly_discovery_playlist_scores_above_passive_playlist(self):
+        meta = {
+            "title": "New Track",
+            "artist": "Test Artist",
+            "reference_artists": "Clairo",
+            "descriptors": "bedroom pop; dreamy; chill",
+            "release_date": "2026-05-01",
+        }
+        fit = analyze_song_fit(None, saved_playlists=[], spotify_track=meta)
+        candidates = [
+            {
+                "playlist_name": "Bedroom Pop Emerging Artists",
+                "playlist_url": "https://open.spotify.com/playlist/discovery",
+                "curator_name": "Indie Blog Curator",
+                "follower_count": 2200,
+                "related_artists": "Clairo",
+                "spotify_description": "Independent artists, submit music for playlist submissions.",
+                "search_query": "bedroom pop emerging artists playlist",
+            },
+            {
+                "playlist_name": "Chill Study Hits",
+                "playlist_url": "https://open.spotify.com/playlist/study",
+                "curator_name": "Passive List",
+                "follower_count": 90000,
+                "related_artists": "Clairo",
+                "spotify_description": "background study focus hits",
+                "search_query": "bedroom pop playlist",
+            },
+        ]
+
+        scored = score_spotify_playlist_candidates(fit, candidates, [])
+
+        self.assertEqual(scored[0]["playlist_name"], "Bedroom Pop Emerging Artists")
+        self.assertIn("emerging artists", scored[0]["discovery_intent_hits"])
+        self.assertIn("submit music", scored[0]["submission_ready_hits"])
+        self.assertIn("study", scored[1]["passive_context_hits"])
 
     def test_released_track_discovery_adds_artist_playlist_queries(self):
         meta = {
