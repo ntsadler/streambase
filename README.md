@@ -58,10 +58,10 @@ Test the connection:
 python3 scripts/test_spotify.py
 ```
 
-Chartmetric is scaffolded behind an environment-driven connector:
+Chartmetric is scaffolded behind an environment-driven connector. Chartmetric issues a long-lived refresh token, which Streambase exchanges for short-lived access tokens automatically:
 
 ```bash
-export CHARTMETRIC_API_TOKEN="..."
+export CHARTMETRIC_REFRESH_TOKEN="..."
 export CHARTMETRIC_API_BASE_URL="https://api.chartmetric.com/api"
 ```
 

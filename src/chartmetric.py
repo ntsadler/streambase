@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict, List, Optional
 
 import requests
@@ -8,21 +9,57 @@ class ChartmetricAPI:
     def __init__(
         self,
         api_token: Optional[str] = None,
+        refresh_token: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: int = 12,
     ):
         self.api_token = api_token or os.getenv("CHARTMETRIC_API_TOKEN", "")
+        self.refresh_token = refresh_token or os.getenv("CHARTMETRIC_REFRESH_TOKEN", "")
         self.base_url = (base_url or os.getenv("CHARTMETRIC_API_BASE_URL", "https://api.chartmetric.com/api")).rstrip("/")
         self.timeout = timeout
         self.last_status_code = 0
         self.last_response_headers = {}
+        self._access_token = ""
+        self._access_token_expires_at = 0.0
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_token)
+        return bool(self.api_token or self.refresh_token)
+
+    def _token_url(self) -> str:
+        root = self.base_url
+        if root.endswith("/api"):
+            root = root[:-4]
+        return f"{root}/api/token"
+
+    def _mint_access_token(self) -> str:
+        if not self.refresh_token:
+            return self.api_token
+        if self._access_token and time.time() < self._access_token_expires_at - 60:
+            return self._access_token
+        resp = requests.post(
+            self._token_url(),
+            json={"refreshtoken": self.refresh_token},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=self.timeout,
+        )
+        self.last_status_code = resp.status_code
+        self.last_response_headers = dict(resp.headers or {})
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("token") or data.get("access_token") or ""
+        if not token:
+            raise RuntimeError("Chartmetric token response did not include an access token.")
+        self._access_token = token
+        try:
+            expires_in = int(data.get("expires_in") or 3600)
+        except (TypeError, ValueError):
+            expires_in = 3600
+        self._access_token_expires_at = time.time() + max(60, expires_in)
+        return self._access_token
 
     def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_token}", "Accept": "application/json"}
+        return {"Authorization": f"Bearer {self._mint_access_token()}", "Accept": "application/json"}
 
     def get(self, path: str, params: Optional[Dict] = None) -> Dict:
         if not self.configured:

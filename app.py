@@ -1318,7 +1318,7 @@ with tab_miner:
                     dry_run=bool(dry_run),
                 )
         if not can_run:
-            st.warning('Add CHARTMETRIC_API_TOKEN to run live mining. You can still plan jobs without the token.')
+            st.warning('Add CHARTMETRIC_REFRESH_TOKEN to run live mining. You can still plan jobs without the token.')
         result=st.session_state.get('chartmetric_mining_result') or {}
         if result:
             st.success(result.get('message','Playlist mining finished.'))

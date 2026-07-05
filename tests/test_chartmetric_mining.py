@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.chartmetric import ChartmetricAPI, extract_playlist_items, normalize_chartmetric_playlist
 from src.chartmetric_mining import chartmetric_queries_from_profile, run_chartmetric_mining
@@ -11,6 +12,7 @@ from src.mining_targets import build_catalog_mining_profile, build_chartmetric_t
 class FakeChartmetric(ChartmetricAPI):
     def __init__(self, configured=True):
         self.api_token = "token" if configured else ""
+        self.refresh_token = ""
         self.base_url = "https://example.test"
         self.timeout = 1
 
@@ -43,6 +45,26 @@ class ChartmetricMiningTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_chartmetric_refresh_token_mints_cached_access_token(self):
+        class FakeResponse:
+            status_code = 200
+            headers = {"X-RateLimit-Remaining": "24"}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"token": "access-token", "expires_in": 3600}
+
+        with patch("src.chartmetric.requests.post", return_value=FakeResponse()) as post:
+            client = ChartmetricAPI(refresh_token="refresh-token", base_url="https://api.chartmetric.com/api")
+            self.assertTrue(client.configured)
+            self.assertEqual(client._headers()["Authorization"], "Bearer access-token")
+            self.assertEqual(client._headers()["Authorization"], "Bearer access-token")
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"], {"refreshtoken": "refresh-token"})
 
     def test_query_planner_uses_profile_targets(self):
         profile = {
