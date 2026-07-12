@@ -28,6 +28,8 @@ def render_campaign_template(template, playlist_name, song_context=None):
         "{song_url}", str(song_context.get("spotify_url") or song_context.get("song_url") or "")
     ).replace(
         "{song_title}", str(song_context.get("title") or song_context.get("song_title") or "")
+    ).replace(
+        "{artist_name}", str(song_context.get("artist_name") or song_context.get("artist") or "")
     )
 
 

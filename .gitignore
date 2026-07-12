@@ -8,6 +8,7 @@ __pycache__/
 local_data/
 local_data_test/
 data/*.sqlite
+work/savepoints/*.sqlite
 data/audio_uploads/
 data/song_profiles.json
 data/artist_sound_profile.json

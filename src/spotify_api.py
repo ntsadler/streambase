@@ -44,14 +44,24 @@ class SpotifyAPI:
     ):
         self.client_id = client_id or os.getenv("SPOTIFY_CLIENT_ID", "")
         self.client_secret = client_secret or os.getenv("SPOTIFY_CLIENT_SECRET", "")
+        self.refresh_token = os.getenv("SPOTIFY_REFRESH_TOKEN", "")
         self.timeout = timeout
         self._token = ""
+        self._user_token = ""
 
     @property
     def configured(self) -> bool:
         return bool(self.client_id and self.client_secret)
 
-    def _headers(self) -> Dict[str, str]:
+    @property
+    def user_configured(self) -> bool:
+        return bool(self.configured and self.refresh_token)
+
+    def _headers(self, user: bool = False) -> Dict[str, str]:
+        if user and self.user_configured:
+            if not self._user_token:
+                self._user_token = self._fetch_user_token()
+            return {"Authorization": f"Bearer {self._user_token}"}
         if not self._token:
             self._token = self._fetch_token()
         return {"Authorization": f"Bearer {self._token}"}
@@ -65,6 +75,20 @@ class SpotifyAPI:
             TOKEN_URL,
             headers={"Authorization": f"Basic {auth}"},
             data={"grant_type": "client_credentials"},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("access_token", "")
+
+    def _fetch_user_token(self) -> str:
+        if not self.user_configured:
+            raise RuntimeError("Spotify user authorization is not configured.")
+        raw = f"{self.client_id}:{self.client_secret}".encode("utf-8")
+        auth = base64.b64encode(raw).decode("ascii")
+        resp = requests.post(
+            TOKEN_URL,
+            headers={"Authorization": f"Basic {auth}"},
+            data={"grant_type": "refresh_token", "refresh_token": self.refresh_token},
             timeout=self.timeout,
         )
         resp.raise_for_status()
@@ -85,18 +109,71 @@ class SpotifyAPI:
             timeout=self.timeout,
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if not (data.get("tracks") or {}).get("items"):
+            try:
+                track_resp = requests.get(
+                    f"{API_BASE}/playlists/{playlist_id}/tracks",
+                    headers=self._headers(),
+                    params={
+                        "fields": "items(track(name,artists(name,id),external_urls,id)),next",
+                        "limit": 100,
+                    },
+                    timeout=self.timeout,
+                )
+                track_resp.raise_for_status()
+                data["tracks"] = track_resp.json()
+            except requests.RequestException:
+                data.setdefault("tracks", {"items": []})
+        return data
+
+    def get_playlist_tracks(self, playlist_url_or_id: str, limit: int = 1000) -> List[Dict]:
+        playlist_id = extract_playlist_id(playlist_url_or_id)
+        if not playlist_id:
+            return []
+        tracks = []
+        offset = 0
+        page_size = 100
+        endpoint = "items" if self.user_configured else "tracks"
+        while len(tracks) < int(limit or 1000):
+            resp = requests.get(
+                f"{API_BASE}/playlists/{playlist_id}/{endpoint}",
+                headers=self._headers(user=self.user_configured),
+                params={
+                    "fields": "items(track(name,artists(name,id),external_urls,id,uri)),next,total",
+                    "limit": page_size,
+                    "offset": offset,
+                },
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items") or []
+            if not items:
+                break
+            tracks.extend(items)
+            if not data.get("next"):
+                break
+            offset += page_size
+        return tracks[: int(limit or 1000)]
 
     def normalize_playlist(self, playlist_url_or_id: str) -> Dict:
         data = self.get_playlist(playlist_url_or_id)
         if not data:
             return {}
+        track_items = data.get("tracks", {}).get("items", []) or []
+        if (data.get("tracks") or {}).get("next"):
+            try:
+                track_items = self.get_playlist_tracks(playlist_url_or_id)
+            except requests.RequestException:
+                pass
         tracks = []
-        for item in data.get("tracks", {}).get("items", []) or []:
+        for item in track_items:
             track = item.get("track") or {}
             artists = [a.get("name", "") for a in track.get("artists", []) if a.get("name")]
             tracks.append(
                 {
+                    "spotify_track_id": track.get("id", ""),
                     "name": track.get("name", ""),
                     "artists": artists,
                     "spotify_url": (track.get("external_urls") or {}).get("spotify", ""),
@@ -111,6 +188,28 @@ class SpotifyAPI:
             "spotify_description": data.get("description", ""),
             "spotify_tracks": tracks,
             "related_artists": "; ".join(sorted({a for t in tracks for a in t.get("artists", [])})),
+        }
+
+    def normalize_playlist_metadata(self, playlist_url_or_id: str) -> Dict:
+        playlist_id = extract_playlist_id(playlist_url_or_id)
+        if not playlist_id:
+            return {}
+        fields = "id,name,description,external_urls,followers(total),owner(display_name,id)"
+        resp = requests.get(
+            f"{API_BASE}/playlists/{playlist_id}",
+            headers=self._headers(),
+            params={"fields": fields},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "spotify_playlist_id": data.get("id", ""),
+            "playlist_name": data.get("name", ""),
+            "playlist_url": (data.get("external_urls") or {}).get("spotify", playlist_url_or_id),
+            "follower_count": (data.get("followers") or {}).get("total", 0),
+            "curator_name": (data.get("owner") or {}).get("display_name", ""),
+            "spotify_description": data.get("description", ""),
         }
 
     def get_track(self, track_url_or_id: str) -> Dict:

@@ -4,6 +4,10 @@ from typing import Dict, List, Optional
 
 import requests
 
+from src.env import load_local_env
+
+load_local_env()
+
 
 class ChartmetricAPI:
     def __init__(

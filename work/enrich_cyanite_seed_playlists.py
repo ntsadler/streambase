@@ -15,6 +15,7 @@ from src.database import (  # noqa: E402
     connect,
     get_or_create_curator,
     init_db,
+    now,
     upsert_contact_method,
     upsert_playlist,
 )
@@ -118,6 +119,15 @@ def save_enriched_playlist(playlist: dict, contact: dict) -> int:
     curator_id = get_or_create_curator(playlist.get("curator_name") or "Unknown Curator")
     for method in methods:
         upsert_contact_method(curator_id, method)
+    if playlist.get("related_artists") and playlist.get("playlist_url"):
+        with connect() as conn:
+            conn.execute(
+                """UPDATE song_playlist_targets
+                   SET related_artists=?, updated_at=?
+                   WHERE playlist_url=? AND source='cyanite_seed'""",
+                (playlist.get("related_artists", ""), now(), playlist.get("playlist_url")),
+            )
+            conn.commit()
     return pid
 
 

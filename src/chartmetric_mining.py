@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from src.chartmetric import ChartmetricAPI, extract_playlist_items, normalize_chartmetric_playlist
 from src.database import (
@@ -152,10 +152,19 @@ def run_chartmetric_mining(
     max_errors_per_run: Optional[int] = None,
     sleep_seconds: Optional[float] = None,
     min_remaining_credits: Optional[int] = None,
+    provider: str = "chartmetric",
+    provider_label: str = "Chartmetric",
+    queries_from_profile: Optional[Callable[[Dict, int], List[Dict]]] = None,
+    extract_items: Optional[Callable[[Dict], List[Dict]]] = None,
+    normalize_playlist: Optional[Callable[[Dict, str], Dict]] = None,
+    search_playlists: Optional[Callable[[object, Dict, int], Dict]] = None,
 ) -> Dict:
     client = client or ChartmetricAPI()
     targets = profile.get("chartmetric_mining_targets") or build_chartmetric_targets(profile)
-    queries = chartmetric_queries_from_profile({**profile, "chartmetric_mining_targets": targets}, max_queries)
+    query_builder = queries_from_profile or chartmetric_queries_from_profile
+    item_extractor = extract_items or extract_playlist_items
+    playlist_normalizer = normalize_playlist or normalize_chartmetric_playlist
+    queries = query_builder({**profile, "chartmetric_mining_targets": targets}, max_queries)
     should_dry_run = (not client.configured) if dry_run is None else dry_run
     max_requests = max_requests_per_run if max_requests_per_run is not None else _env_int("CHARTMETRIC_MAX_REQUESTS_PER_RUN", 1000)
     max_runtime = max_runtime_seconds if max_runtime_seconds is not None else _env_int("CHARTMETRIC_MAX_RUNTIME_SECONDS", 4 * 60 * 60)
@@ -166,8 +175,8 @@ def run_chartmetric_mining(
     if job_id and not get_mining_job(job_id, db_path=db_path):
         job_id = 0
     if not job_id:
-        job_id = create_mining_job(profile, {"queries": queries, **targets, "budgets": {"max_requests_per_run": max_requests, "max_runtime_seconds": max_runtime, "max_errors_per_run": max_errors, "min_remaining_credits": min_credits}}, status="planned" if should_dry_run else "running", db_path=db_path) if db_path else create_mining_job(profile, {"queries": queries, **targets, "budgets": {"max_requests_per_run": max_requests, "max_runtime_seconds": max_runtime, "max_errors_per_run": max_errors, "min_remaining_credits": min_credits}}, status="planned" if should_dry_run else "running")
-    plan_mining_query_runs(job_id, queries, source="chartmetric", db_path=db_path) if db_path else plan_mining_query_runs(job_id, queries, source="chartmetric")
+        job_id = create_mining_job(profile, {"queries": queries, **targets, "budgets": {"max_requests_per_run": max_requests, "max_runtime_seconds": max_runtime, "max_errors_per_run": max_errors, "min_remaining_credits": min_credits}}, source=provider, status="planned" if should_dry_run else "running", db_path=db_path) if db_path else create_mining_job(profile, {"queries": queries, **targets, "budgets": {"max_requests_per_run": max_requests, "max_runtime_seconds": max_runtime, "max_errors_per_run": max_errors, "min_remaining_credits": min_credits}}, source=provider, status="planned" if should_dry_run else "running")
+    plan_mining_query_runs(job_id, queries, source=provider, db_path=db_path) if db_path else plan_mining_query_runs(job_id, queries, source=provider)
 
     if should_dry_run:
         if db_path:
@@ -180,7 +189,7 @@ def run_chartmetric_mining(
             "job_id": job_id,
             "queries": queries,
             "playlists": [],
-            "message": "Chartmetric mining job planned. Add CHARTMETRIC_API_TOKEN to run live mining.",
+            "message": f"{provider_label} mining job planned. Add the provider API key to run live mining.",
         }
 
     update_mining_job(job_id, status="running", query_count=len(queries), db_path=db_path) if db_path else update_mining_job(job_id, status="running", query_count=len(queries))
@@ -207,6 +216,8 @@ def run_chartmetric_mining(
         try:
             if query_type == "artist":
                 response = client.search_playlists_by_artist(query, limit_per_query)
+            elif search_playlists:
+                response = search_playlists(client, query_run, limit_per_query)
             else:
                 response = client.search_playlists(query, limit_per_query)
             request_count += 1
@@ -214,7 +225,7 @@ def run_chartmetric_mining(
             status_code = int(getattr(client, "last_status_code", 0) or 200)
             remaining = _remaining_credits(headers)
             credits = _credits_used(headers)
-            log_api_usage_event("chartmetric", f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=credits, remaining_credits=remaining, rate_limited=status_code == 429, db_path=db_path) if db_path else log_api_usage_event("chartmetric", f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=credits, remaining_credits=remaining, rate_limited=status_code == 429)
+            log_api_usage_event(provider, f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=credits, remaining_credits=remaining, rate_limited=status_code == 429, db_path=db_path) if db_path else log_api_usage_event(provider, f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=credits, remaining_credits=remaining, rate_limited=status_code == 429)
             if remaining is not None and min_credits and remaining <= min_credits:
                 paused_reason = f"Remaining credits reached guardrail ({remaining} <= {min_credits})."
                 update_mining_query_run(query_run["id"], status="paused_quota", request_count=1, error=paused_reason, raw_response=response, db_path=db_path) if db_path else update_mining_query_run(query_run["id"], status="paused_quota", request_count=1, error=paused_reason, raw_response=response)
@@ -222,9 +233,9 @@ def run_chartmetric_mining(
             result_count = 0
             query_saved = 0
             query_filtered = 0
-            for raw in extract_playlist_items(response):
+            for raw in item_extractor(response):
                 result_count += 1
-                playlist = normalize_chartmetric_playlist(raw, query)
+                playlist = playlist_normalizer(raw, query)
                 playlist.update(score_mined_playlist(playlist, profile, targets))
                 if playlist_within_follower_range(playlist, targets):
                     saved_id = save_mined_playlist(job_id, playlist, db_path=db_path) if db_path else save_mined_playlist(job_id, playlist)
@@ -246,11 +257,13 @@ def run_chartmetric_mining(
             response = getattr(exc, "response", None)
             status_code = int(getattr(response, "status_code", 0) or getattr(client, "last_status_code", 0) or 0)
             rate_limited = status_code == 429 or "429" in str(exc)
-            log_api_usage_event("chartmetric", f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=0, rate_limited=rate_limited, error=str(exc), db_path=db_path) if db_path else log_api_usage_event("chartmetric", f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=0, rate_limited=rate_limited, error=str(exc))
+            log_api_usage_event(provider, f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=0, rate_limited=rate_limited, error=str(exc), db_path=db_path) if db_path else log_api_usage_event(provider, f"playlist_search:{query_type}", query, status_code=status_code, request_count=1, credits_used=0, rate_limited=rate_limited, error=str(exc))
             update_mining_query_run(query_run["id"], status="paused_rate_limit" if rate_limited else "failed", request_count=1, error=str(exc), completed=not rate_limited, db_path=db_path) if db_path else update_mining_query_run(query_run["id"], status="paused_rate_limit" if rate_limited else "failed", request_count=1, error=str(exc), completed=not rate_limited)
             if rate_limited:
                 paused_reason = f"Rate limited while running {query}."
                 break
+            if sleep_for:
+                time.sleep(sleep_for)
 
     all_runs = get_mining_query_runs(job_id, db_path=db_path) if db_path else get_mining_query_runs(job_id)
     totals = _query_totals(all_runs)
@@ -275,5 +288,5 @@ def run_chartmetric_mining(
         "paused": bool(paused_reason),
         "paused_reason": paused_reason,
         "errors": errors,
-        "message": f"Chartmetric mining {status}. Saved {totals['saved_count']} under-1,000 playlist(s). Filtered out {totals['filtered_count']}.",
+        "message": f"{provider_label} mining {status}. Saved {totals['saved_count']} under-1,000 playlist(s). Filtered out {totals['filtered_count']}.",
     }

@@ -4,6 +4,7 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from src.settings import load_local_env
 from src.web_enricher import (
     EMAIL_RE,
     generic_contact_result,
@@ -11,6 +12,8 @@ from src.web_enricher import (
     score_contact_method,
     valid_contact_email,
 )
+
+load_local_env()
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 URL_RE = re.compile(r"https?://[^\s<>'\"\])}]+", re.I)

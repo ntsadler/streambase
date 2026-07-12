@@ -1,15 +1,58 @@
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 import requests
 
-from src.spotify_api import extract_playlist_id, extract_track_id, search_spotify_playlists, search_spotify_playlists_multi_market
+from src.spotify_api import SpotifyAPI, extract_playlist_id, extract_track_id, search_spotify_playlists, search_spotify_playlists_multi_market
 
 
 class SpotifyApiTests(unittest.TestCase):
     def test_extract_ids_from_links(self):
         self.assertEqual(extract_track_id("https://open.spotify.com/track/abc123?si=x"), "abc123")
         self.assertEqual(extract_playlist_id("https://open.spotify.com/playlist/pl123?si=x"), "pl123")
+
+    @patch("src.spotify_api.requests.get")
+    def test_get_playlist_tracks_paginates(self, mock_get):
+        first = Mock()
+        first.raise_for_status.return_value = None
+        first.json.return_value = {
+            "items": [{"track": {"id": "one", "name": "One", "artists": []}}],
+            "next": "https://api.spotify.com/v1/playlists/pl123/tracks?offset=100",
+        }
+        second = Mock()
+        second.raise_for_status.return_value = None
+        second.json.return_value = {
+            "items": [{"track": {"id": "two", "name": "Two", "artists": []}}],
+            "next": None,
+        }
+        mock_get.side_effect = [first, second]
+
+        client = SpotifyAPI("id", "secret")
+        client._token = "token"
+        tracks = client.get_playlist_tracks("https://open.spotify.com/playlist/pl123")
+
+        self.assertEqual([item["track"]["id"] for item in tracks], ["one", "two"])
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertIn("/playlists/pl123/tracks", mock_get.call_args_list[0].args[0])
+
+    @patch("src.spotify_api.requests.get")
+    def test_get_playlist_tracks_uses_items_endpoint_with_user_token(self, mock_get):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "items": [{"track": {"id": "one", "name": "One", "artists": []}}],
+            "next": None,
+        }
+        mock_get.return_value = response
+
+        with patch.dict("os.environ", {"SPOTIFY_REFRESH_TOKEN": "refresh"}, clear=False):
+            client = SpotifyAPI("id", "secret")
+            client._user_token = "user-token"
+            tracks = client.get_playlist_tracks("https://open.spotify.com/playlist/pl123")
+
+        self.assertEqual([item["track"]["id"] for item in tracks], ["one"])
+        self.assertIn("/playlists/pl123/items", mock_get.call_args.args[0])
 
     @patch("src.spotify_api.SpotifyAPI")
     def test_search_spotify_playlists_dedupes_results(self, mock_api):

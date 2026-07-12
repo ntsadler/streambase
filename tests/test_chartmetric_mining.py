@@ -7,6 +7,8 @@ from src.chartmetric import ChartmetricAPI, extract_playlist_items, normalize_ch
 from src.chartmetric_mining import chartmetric_queries_from_profile, run_chartmetric_mining
 from src.database import get_api_usage_events, get_mined_playlists, get_mining_jobs, get_mining_query_runs, init_db
 from src.mining_targets import build_catalog_mining_profile, build_chartmetric_targets
+from src.viberate import ViberateAPI, normalize_viberate_playlist
+from src.viberate_mining import _viberate_sleep_seconds, run_viberate_mining, viberate_queries_from_profile
 
 
 class FakeChartmetric(ChartmetricAPI):
@@ -34,6 +36,30 @@ class FakeChartmetric(ChartmetricAPI):
                     "description": "A test indie dance playlist",
                 }
             ]
+        }
+
+
+class FakeViberate(ViberateAPI):
+    def __init__(self, configured=True):
+        self.api_key = "token" if configured else ""
+        self.base_url = "https://example.test"
+        self.timeout = 1
+        self.last_status_code = 200
+        self.last_response_headers = {"X-RateLimit-Remaining": "99"}
+
+    def search_playlists(self, query, limit=25, offset=0):
+        return {
+            "data": {
+                "playlists": [
+                    {
+                        "viberate_playlist_id": "vb1",
+                        "playlist_name": f"{query} Viberate Playlist",
+                        "playlist_url": "https://open.spotify.com/playlist/vb1",
+                        "follower_count": 450,
+                        "spotify_description": "A test indie dance playlist",
+                    }
+                ]
+            }
         }
 
 
@@ -159,6 +185,46 @@ class ChartmetricMiningTests(unittest.TestCase):
 
     def test_extract_playlist_items_handles_nested_shapes(self):
         self.assertEqual(extract_playlist_items({"data": {"results": [{"id": 1}]}}), [{"id": 1}])
+
+    def test_viberate_lane_uses_separate_source(self):
+        profile = {"profile_name": "Artist Sound Profile", "core_genre_tags": ["indie dance"]}
+
+        result = run_viberate_mining(profile, client=FakeViberate(configured=True), dry_run=False, max_queries=1, sleep_seconds=0, db_path=self.db_path)
+
+        self.assertEqual(result["saved_count"], 1)
+        jobs = get_mining_jobs(self.db_path)
+        self.assertEqual(jobs[0]["source"], "viberate")
+        mined = get_mined_playlists(result["job_id"], self.db_path)
+        self.assertEqual(mined[0]["source"], "viberate")
+        self.assertEqual(mined[0]["source_playlist_id"], "vb1")
+        self.assertEqual(len(get_api_usage_events("viberate", self.db_path)), 1)
+
+    def test_normalize_viberate_playlist(self):
+        playlist = normalize_viberate_playlist({"viberate_playlist_id": "vb1", "playlist_name": "Test", "follower_count": 100}, "indie dance")
+
+        self.assertEqual(playlist["source"], "viberate")
+        self.assertEqual(playlist["source_playlist_id"], "vb1")
+        self.assertEqual(playlist["playlist_name"], "Test")
+
+    def test_viberate_defaults_to_trial_safe_three_requests_per_minute(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_viberate_sleep_seconds(None), 20.0)
+
+    def test_viberate_queries_use_playlist_title_search_phrasing(self):
+        profile = {
+            "profile_name": "Artist Sound Profile",
+            "core_genre_tags": ["Pop"],
+            "core_mood_tags": ["Uplifting"],
+            "cyanite_seed_artists": ["Tame Impala"],
+        }
+
+        queries = viberate_queries_from_profile(profile, limit=8)
+
+        self.assertEqual(queries[0], {"type": "artist_playlist", "query": "Tame Impala"})
+        self.assertIn({"type": "artist_playlist", "query": "Tame Impala | offset=20"}, queries)
+        self.assertIn({"type": "chart", "query": "genre=Pop; playlist_type=Indie Curator"}, queries)
+        self.assertIn({"type": "query", "query": "Pop playlist"}, queries)
+        self.assertFalse(any("playlists tagged" in item["query"].lower() for item in queries))
 
 
 if __name__ == "__main__":

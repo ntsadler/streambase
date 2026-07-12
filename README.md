@@ -65,6 +65,20 @@ export CHARTMETRIC_REFRESH_TOKEN="..."
 export CHARTMETRIC_API_BASE_URL="https://api.chartmetric.com/api"
 ```
 
+Viberate can run in the parallel Playlist Miner lane with the temporary trial key. The miner defaults to the trial-safe limit of 3 requests/minute:
+
+```bash
+export VIBERATE_API_KEY="..."
+export VIBERATE_API_BASE_URL="https://data.viberate.com/api/v1"
+export VIBERATE_REQUESTS_PER_MINUTE=3
+```
+
+Test the Viberate connection:
+
+```bash
+python3 scripts/test_viberate.py
+```
+
 Email drafts are queued as `pending_approval` records in SQLite. Approve, reject, or mark them sent from the Email Queue tab.
 
 ## Song Fit

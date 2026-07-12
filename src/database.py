@@ -14,6 +14,25 @@ def init_db(db_path=DB_PATH):
         c.execute("CREATE TABLE IF NOT EXISTS email_queue (id INTEGER PRIMARY KEY AUTOINCREMENT,curator_id INTEGER,playlist_id INTEGER,to_email TEXT,subject TEXT,body TEXT,status TEXT DEFAULT 'pending_approval',created_at TEXT,updated_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS outreach_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,song_id INTEGER DEFAULT 0,name TEXT,status TEXT DEFAULT 'draft',subject_template TEXT,body_template TEXT,specifications_json TEXT,created_at TEXT,updated_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS outreach_campaign_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id INTEGER,playlist_id INTEGER,fit_score REAL DEFAULT 0,reason TEXT,email_status TEXT DEFAULT 'pending',instagram_status TEXT DEFAULT 'pending',submission_status TEXT DEFAULT 'pending',created_at TEXT,updated_at TEXT,UNIQUE(campaign_id,playlist_id))")
+        c.execute("""CREATE TABLE IF NOT EXISTS campaign_outreach_tasks (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     song_id INTEGER,
+                     playlist_id INTEGER,
+                     curator_id INTEGER,
+                     channel TEXT,
+                     contact_destination TEXT,
+                     task_status TEXT DEFAULT 'pending',
+                     outcome_status TEXT DEFAULT 'pending',
+                     attempted_at TEXT,
+                     notes TEXT,
+                     email_queue_id INTEGER DEFAULT 0,
+                     campaign_id INTEGER DEFAULT 0,
+                     fit_score REAL DEFAULT 0,
+                     source TEXT,
+                     created_at TEXT,
+                     updated_at TEXT,
+                     UNIQUE(song_id,playlist_id,channel,contact_destination)
+                     )""")
         c.execute("CREATE TABLE IF NOT EXISTS email_replies (id INTEGER PRIMARY KEY AUTOINCREMENT,gmail_message_id TEXT UNIQUE,gmail_thread_id TEXT,email_queue_id INTEGER DEFAULT 0,curator_id INTEGER DEFAULT 0,playlist_id INTEGER DEFAULT 0,from_email TEXT,from_name TEXT,subject TEXT,snippet TEXT,received_at TEXT,match_status TEXT DEFAULT 'unmatched',created_at TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS song_fit_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,song_title TEXT,artist_name TEXT,playlist_name TEXT,playlist_url TEXT,curator_name TEXT,fit_score REAL,status TEXT DEFAULT 'target',notes TEXT,created_at TEXT,UNIQUE(song_title,artist_name,playlist_url))")
         c.execute("CREATE TABLE IF NOT EXISTS artist_songs (id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT,file_path TEXT UNIQUE,bpm REAL,key TEXT,genre_tags TEXT,mood_tags TEXT,energy TEXT,danceability REAL,instrumentation TEXT,vocal_style TEXT,reference_artists TEXT,notes TEXT,created_at TEXT,updated_at TEXT)")
@@ -57,11 +76,132 @@ def init_db(db_path=DB_PATH):
         ensure_column(c,'mined_playlists','best_song_titles','TEXT')
         ensure_column(c,'mined_playlists','follower_tier','TEXT')
         ensure_column(c,'mined_playlists','matched_terms','TEXT')
+        ensure_column(c,'mined_playlists','source_playlist_id','TEXT')
         ensure_column(c,'song_playlist_targets','source','TEXT')
         ensure_column(c,'song_playlist_targets','related_artists','TEXT')
         ensure_column(c,'song_playlist_targets','raw_json','TEXT')
         ensure_column(c,'song_playlist_targets','updated_at','TEXT')
         c.commit()
+
+def sync_song_campaign_tasks(song_id,min_fit=70,db_path=DB_PATH):
+    song_id=int(song_id or 0)
+    if not song_id: return 0
+    inserted=0
+    with connect(db_path) as c:
+        rows=c.execute("""WITH ranked_contacts AS (
+                              SELECT spt.song_id,p.id AS playlist_id,p.curator_id,COALESCE(spt.fit_score,0) AS fit_score,spt.source,
+                                     CASE WHEN cm.type='submission_page' THEN 'submission' ELSE cm.type END AS channel,
+                                     cm.value AS contact_destination,
+                                     ROW_NUMBER() OVER (
+                                         PARTITION BY spt.song_id,p.id,CASE WHEN cm.type='submission_page' THEN 'submission' ELSE cm.type END
+                                         ORDER BY COALESCE(cm.confidence_score,0) DESC,cm.created_at DESC,cm.id DESC
+                                     ) AS contact_rank
+                              FROM song_playlist_targets spt
+                              JOIN playlists p ON p.url=spt.playlist_url
+                              JOIN curators cur ON cur.id=p.curator_id
+                              JOIN contact_methods cm ON cm.curator_id=p.curator_id
+                              WHERE spt.song_id=?
+                                AND COALESCE(spt.fit_score,0)>=?
+                                AND lower(cur.name) NOT IN ('unknown curator','spotify')
+                                AND cm.type IN ('email','instagram','submission_page')
+                                AND COALESCE(cm.value,'')!=''
+                          ),
+                          primary_playlist_contacts AS (
+                              SELECT * FROM ranked_contacts WHERE contact_rank=1
+                          ),
+                          ranked_routes AS (
+                              SELECT *,
+                                     ROW_NUMBER() OVER (
+                                         PARTITION BY song_id,channel,lower(contact_destination)
+                                         ORDER BY fit_score DESC,playlist_id DESC
+                                     ) AS route_rank
+                              FROM primary_playlist_contacts
+                          )
+                          SELECT * FROM ranked_routes WHERE route_rank=1""",(song_id,float(min_fit or 0))).fetchall()
+        for row in rows:
+            channel=row['channel']
+            cur=c.execute("""INSERT OR IGNORE INTO campaign_outreach_tasks
+                             (song_id,playlist_id,curator_id,channel,contact_destination,task_status,outcome_status,fit_score,source,created_at,updated_at)
+                             VALUES (?,?,?,?,?,'pending','pending',?,?,?,?)""",
+                          (song_id,int(row['playlist_id'] or 0),int(row['curator_id'] or 0),channel,row['contact_destination'],
+                           float(row['fit_score'] or 0),row['source'] or 'song_playlist_targets',now(),now()))
+            inserted+=cur.rowcount
+        c.commit()
+    return inserted
+
+def get_song_campaign_tasks(song_id=None,db_path=DB_PATH):
+    args=[]
+    where=''
+    if song_id is not None:
+        where='WHERE t.song_id=?'
+        args.append(int(song_id or 0))
+    sql=f"""SELECT t.*,s.title AS song_title,s.artist_name,s.spotify_url,
+                   p.name AS playlist_name,p.url AS playlist_url,p.followers,c.display_name AS curator_name,
+                   q.status AS email_queue_status,
+                   CASE WHEN EXISTS (SELECT 1 FROM email_replies r WHERE r.email_queue_id=t.email_queue_id) THEN 1 ELSE 0 END AS has_email_reply
+            FROM campaign_outreach_tasks t
+            LEFT JOIN songs s ON s.id=t.song_id
+            LEFT JOIN playlists p ON p.id=t.playlist_id
+            LEFT JOIN curators c ON c.id=t.curator_id
+            LEFT JOIN email_queue q ON q.id=t.email_queue_id
+            {where}
+            ORDER BY t.task_status='completed',t.fit_score DESC,p.name,t.channel"""
+    with connect(db_path) as c:
+        rows=c.execute(sql,args).fetchall()
+    return [dict(r) for r in rows]
+
+def update_campaign_outreach_task(task_id,task_status=None,outcome_status=None,attempted=False,notes=None,email_queue_id=None,db_path=DB_PATH):
+    with connect(db_path) as c:
+        row=c.execute('SELECT * FROM campaign_outreach_tasks WHERE id=?',(int(task_id),)).fetchone()
+        if not row: return 0
+        c.execute("""UPDATE campaign_outreach_tasks
+                     SET task_status=?,
+                         outcome_status=?,
+                         attempted_at=CASE WHEN ? THEN COALESCE(attempted_at,?) ELSE attempted_at END,
+                         notes=?,
+                         email_queue_id=?,
+                         updated_at=?
+                     WHERE id=?""",
+                  (task_status if task_status is not None else row['task_status'],
+                   outcome_status if outcome_status is not None else row['outcome_status'],
+                   1 if attempted else 0,now(),
+                   notes if notes is not None else row['notes'],
+                   int(email_queue_id if email_queue_id is not None else row['email_queue_id'] or 0),
+                   now(),int(task_id)))
+        c.commit()
+        return int(task_id)
+
+def get_song_campaign_overview(db_path=DB_PATH):
+    songs=get_release_songs(db_path)
+    with connect(db_path) as c:
+        rows=c.execute("""SELECT song_id,
+                          COUNT(*) AS total_tasks,
+                          SUM(CASE WHEN task_status='completed' THEN 1 ELSE 0 END) AS completed_tasks,
+                          SUM(CASE WHEN channel='email' THEN 1 ELSE 0 END) AS email_tasks,
+                          SUM(CASE WHEN channel='email' AND task_status='completed' THEN 1 ELSE 0 END) AS email_completed,
+                          SUM(CASE WHEN channel='instagram' THEN 1 ELSE 0 END) AS instagram_tasks,
+                          SUM(CASE WHEN channel='instagram' AND task_status='completed' THEN 1 ELSE 0 END) AS instagram_completed,
+                          SUM(CASE WHEN channel='submission' THEN 1 ELSE 0 END) AS submission_tasks,
+                          SUM(CASE WHEN channel='submission' AND task_status='completed' THEN 1 ELSE 0 END) AS submission_completed
+                          FROM campaign_outreach_tasks GROUP BY song_id""").fetchall()
+    stats={int(r['song_id'] or 0):dict(r) for r in rows}
+    overview=[]
+    for song in songs:
+        song_id=int(song.get('id') or 0)
+        stat=stats.get(song_id,{})
+        total=int(stat.get('total_tasks') or 0)
+        completed=int(stat.get('completed_tasks') or 0)
+        if total==0 or completed==0:
+            status='Campaign Not Started'
+            indicator='🔴'
+        elif completed>=total:
+            status='Campaign Finished'
+            indicator='✅'
+        else:
+            status='Campaign In Progress'
+            indicator='🟡'
+        overview.append({**song,**stat,'total_tasks':total,'completed_tasks':completed,'campaign_task_status':status,'campaign_indicator':indicator,'completion_pct':round((completed/total)*100,1) if total else 0})
+    return overview
 def ensure_column(conn,table,column,definition):
     cols={r['name'] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()}
     if column not in cols: conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
@@ -72,7 +212,15 @@ def get_or_create_curator(name,db_path=DB_PATH):
         if row: return int(row['id'])
         cur=c.execute('INSERT INTO curators (name,display_name,created_at) VALUES (?,?,?)',(clean.lower(),clean,now())); c.commit(); return int(cur.lastrowid)
 def upsert_playlist(item,db_path=DB_PATH):
-    curator_id=get_or_create_curator(item.get('curator') or item.get('curator_name') or 'Unknown Curator',db_path); url=item.get('url') or item.get('playlist_url') or ''
+    url=item.get('url') or item.get('playlist_url') or ''
+    incoming_curator=(item.get('curator') or item.get('curator_name') or '').strip()
+    incoming_unknown=not incoming_curator or incoming_curator.lower() in {'unknown','unknown curator'}
+    with connect(db_path) as c:
+        existing=c.execute('SELECT curator_id FROM playlists WHERE url=?',(url,)).fetchone()
+    if incoming_unknown and existing and int(existing['curator_id'] or 0):
+        curator_id=int(existing['curator_id'] or 0)
+    else:
+        curator_id=get_or_create_curator(incoming_curator or 'Unknown Curator',db_path)
     with connect(db_path) as c:
         c.execute("""INSERT OR REPLACE INTO playlists (curator_id,name,url,platform,followers,related_artists,spotify_description,similarity_score,intersection_score,final_score,priority,status,created_at,spotify_playlist_id,scoring_notes,submithub_verified,submithub_url) VALUES (?,?,?,COALESCE((SELECT platform FROM playlists WHERE url=?),'spotify'),?,?,?,?,?,?,?,COALESCE((SELECT status FROM playlists WHERE url=?),'new'),COALESCE((SELECT created_at FROM playlists WHERE url=?),?),?,?,?,?)""",(curator_id,item.get('name') or item.get('playlist_name'),url,url,int(item.get('followers') or item.get('follower_count') or 0),item.get('related_artists',''),item.get('spotify_description',''),item.get('similarity_score',0),item.get('intersection_score',0),item.get('final_score',0),item.get('priority','new'),url,url,now(),item.get('spotify_playlist_id',''),item.get('scoring_notes',''),1 if item.get('submithub_verified') else 0,item.get('submithub_url','')))
         row=c.execute('SELECT id FROM playlists WHERE url=?',(url,)).fetchone(); c.commit(); return int(row['id']) if row else 0
@@ -282,14 +430,48 @@ def save_song_fit_targets(song,matches,db_path=DB_PATH):
 def get_song_fit_targets(db_path=DB_PATH):
     with connect(db_path) as c:
         legacy=[dict(r) for r in c.execute('SELECT * FROM song_fit_targets ORDER BY created_at DESC, fit_score DESC').fetchall()]
-        catalog=[dict(r) for r in c.execute("""SELECT spt.id,spt.song_id,s.title AS song_title,s.artist_name,
+        table_names={r['name'] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if 'viberate_cyanite_playlist_matches' in table_names:
+            catalog_sql="""WITH viberate_match_summary AS (
+                    SELECT catalog_song_id,playlist_url,
+                           MAX(playlist_name) AS mined_playlist_name,
+                           MAX(curator_name) AS mined_curator_name,
+                           MAX(follower_count) AS mined_follower_count,
+                           COUNT(DISTINCT seed_artist) AS seed_match_count,
+                           GROUP_CONCAT(DISTINCT seed_artist) AS cyanite_seed_artists,
+                           MIN(seed_rank) AS best_seed_rank,
+                           MAX(fit_score) AS viberate_fit_score
+                    FROM viberate_cyanite_playlist_matches
+                    GROUP BY catalog_song_id,playlist_url
+                )
+                SELECT spt.id,spt.song_id,s.title AS song_title,s.artist_name,
+                       COALESCE(NULLIF(spt.playlist_name,''),vms.mined_playlist_name) AS playlist_name,
+                       spt.playlist_url,p.curator_id,
+                       COALESCE(c.display_name,vms.mined_curator_name) AS curator_name,
+                       COALESCE(p.followers,vms.mined_follower_count,0) AS follower_count,
+                       MAX(COALESCE(spt.fit_score,0),COALESCE(vms.viberate_fit_score,0)) AS fit_score,
+                       spt.status,spt.notes,spt.created_at,spt.source,spt.related_artists,spt.raw_json,spt.updated_at,
+                       COALESCE(vms.seed_match_count,0) AS seed_match_count,
+                       COALESCE(vms.cyanite_seed_artists,'') AS cyanite_seed_artists,
+                       COALESCE(vms.best_seed_rank,0) AS best_seed_rank
+                FROM song_playlist_targets spt
+                LEFT JOIN songs s ON s.id=spt.song_id
+                LEFT JOIN playlists p ON p.url=spt.playlist_url
+                LEFT JOIN curators c ON c.id=p.curator_id
+                LEFT JOIN viberate_match_summary vms ON vms.catalog_song_id=spt.song_id AND vms.playlist_url=spt.playlist_url
+                ORDER BY spt.created_at DESC, fit_score DESC"""
+        else:
+            catalog_sql="""SELECT spt.id,spt.song_id,s.title AS song_title,s.artist_name,
                          spt.playlist_name,spt.playlist_url,p.curator_id,c.display_name AS curator_name,
-                         spt.fit_score,spt.status,spt.notes,spt.created_at
+                         COALESCE(p.followers,0) AS follower_count,
+                         spt.fit_score,spt.status,spt.notes,spt.created_at,spt.source,spt.related_artists,spt.raw_json,spt.updated_at,
+                         0 AS seed_match_count,'' AS cyanite_seed_artists,0 AS best_seed_rank
                   FROM song_playlist_targets spt
                   LEFT JOIN songs s ON s.id=spt.song_id
                   LEFT JOIN playlists p ON p.url=spt.playlist_url
                   LEFT JOIN curators c ON c.id=p.curator_id
-                  ORDER BY spt.created_at DESC, spt.fit_score DESC""").fetchall()]
+                  ORDER BY spt.created_at DESC, spt.fit_score DESC"""
+        catalog=[dict(r) for r in c.execute(catalog_sql).fetchall()]
     seen=set()
     merged=[]
     for row in catalog+legacy:
@@ -452,13 +634,14 @@ def get_api_usage_events(source=None,db_path=DB_PATH):
     return [dict(r) for r in rows]
 
 def save_mined_playlist(job_id,playlist,db_path=DB_PATH):
-    if not playlist.get('playlist_url') and not playlist.get('chartmetric_playlist_id'): return 0
+    source_playlist_id=playlist.get('source_playlist_id') or playlist.get('chartmetric_playlist_id') or ''
+    if not playlist.get('playlist_url') and not source_playlist_id: return 0
     raw=playlist.get('raw_json') or playlist.get('raw') or {}
     if not isinstance(raw,str): raw=json.dumps(raw,ensure_ascii=True)
     with connect(db_path) as c:
-        cur=c.execute("""INSERT OR IGNORE INTO mined_playlists (mining_job_id,source,query,playlist_name,playlist_url,curator_name,follower_count,spotify_description,last_updated,chartmetric_playlist_id,raw_json,status,created_at,fit_score,fit_reason,best_song_titles,follower_tier,matched_terms)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                      (int(job_id),playlist.get('source','chartmetric'),playlist.get('search_query') or playlist.get('query',''),playlist.get('playlist_name',''),playlist.get('playlist_url',''),playlist.get('curator_name',''),int(playlist.get('follower_count') or 0),playlist.get('spotify_description',''),playlist.get('last_updated',''),playlist.get('chartmetric_playlist_id',''),raw,playlist.get('status','mined'),now(),float(playlist.get('fit_score') or 0),playlist.get('fit_reason',''),playlist.get('best_song_titles',''),playlist.get('follower_tier',''),playlist.get('matched_terms','')))
+        cur=c.execute("""INSERT OR IGNORE INTO mined_playlists (mining_job_id,source,query,playlist_name,playlist_url,curator_name,follower_count,spotify_description,last_updated,chartmetric_playlist_id,source_playlist_id,raw_json,status,created_at,fit_score,fit_reason,best_song_titles,follower_tier,matched_terms)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (int(job_id),playlist.get('source','chartmetric'),playlist.get('search_query') or playlist.get('query',''),playlist.get('playlist_name',''),playlist.get('playlist_url',''),playlist.get('curator_name',''),int(playlist.get('follower_count') or 0),playlist.get('spotify_description',''),playlist.get('last_updated',''),playlist.get('chartmetric_playlist_id',''),source_playlist_id,raw,playlist.get('status','mined'),now(),float(playlist.get('fit_score') or 0),playlist.get('fit_reason',''),playlist.get('best_song_titles',''),playlist.get('follower_tier',''),playlist.get('matched_terms','')))
         c.commit(); return int(cur.lastrowid) if cur.rowcount else 0
 
 def bulk_save_mined_playlists(job_id,playlists,db_path=DB_PATH):
