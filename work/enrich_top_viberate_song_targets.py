@@ -107,6 +107,16 @@ def candidate_rows(limit, multi_seed_first=True, db_path=DB_PATH):
 def all_saved_candidate_rows(limit, retry_errors=True, db_path=DB_PATH):
     retry_clause = "OR cer.status = 'error'" if retry_errors else ""
     sql = f"""
+        WITH viberate_urls AS (
+            SELECT DISTINCT playlist_url
+            FROM song_playlist_targets
+            WHERE source LIKE 'viberate%'
+              AND COALESCE(playlist_url, '') != ''
+            UNION
+            SELECT DISTINCT playlist_url
+            FROM viberate_cyanite_playlist_matches
+            WHERE COALESCE(playlist_url, '') != ''
+        )
         SELECT
             0 AS song_id,
             '' AS song_title,
@@ -126,6 +136,7 @@ def all_saved_candidate_rows(limit, retry_errors=True, db_path=DB_PATH):
              FROM contact_methods cm
              WHERE cm.curator_id = p.curator_id) AS contact_count
         FROM playlists p
+        JOIN viberate_urls vu ON vu.playlist_url = p.url
         LEFT JOIN curators c ON c.id = p.curator_id
         LEFT JOIN viberate_contact_enrichment_runs cer ON cer.playlist_url = p.url
         WHERE COALESCE(p.url, '') != ''
