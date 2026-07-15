@@ -20,6 +20,7 @@ from src.viberate import ViberateAPI, extract_playlist_items, normalize_viberate
 from work.run_viberate_cyanite_seed_mining import (  # noqa: E402
     SOURCE,
     connect,
+    curator_allowed,
     env_float,
     env_int,
     follower_ok,
@@ -229,6 +230,7 @@ def main():
     inner_sleep = env_float("VIBERATE_CYANITE_INNER_SLEEP_SECONDS", 22.0)
     after_seed_sleep = env_float("VIBERATE_CYANITE_AFTER_SEED_SLEEP_SECONDS", 22.0)
     max_errors = env_int("VIBERATE_CYANITE_PAGE_MAX_ERRORS", 20)
+    max_playlists_per_curator = env_int("VIBERATE_MAX_PLAYLISTS_PER_CURATOR", 5)
 
     seeds = seed_rows(DB_PATH)
     mining_job_id = create_or_resume_job(DB_PATH, offsets, limit_per_seed, runtime_seconds)
@@ -276,8 +278,11 @@ def main():
                 playlist["best_song_titles"] = run["catalog_title"]
                 playlist["fit_reason"] = f"Cyanite similar seed artist page {run['page_offset']}: {run['seed_artist']}"
                 if follower_ok(playlist, follower_min, follower_max):
-                    save_mined_playlist(mining_job_id, playlist, db_path=DB_PATH)
-                    saved_count += save_seed_match(DB_PATH, mining_job_id, run, playlist)
+                    if curator_allowed(DB_PATH, playlist, max_playlists_per_curator):
+                        save_mined_playlist(mining_job_id, playlist, db_path=DB_PATH)
+                        saved_count += save_seed_match(DB_PATH, mining_job_id, run, playlist)
+                    else:
+                        filtered_count += 1
                 else:
                     filtered_count += 1
             update_page_run(

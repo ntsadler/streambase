@@ -139,6 +139,43 @@ def follower_ok(playlist, follower_min, follower_max):
     return int(follower_min) <= followers <= int(follower_max)
 
 
+def canonical_curator_name(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def existing_curator_playlist_count(db_path, curator_name):
+    name = canonical_curator_name(curator_name)
+    if not name:
+        return 0
+    with connect(db_path) as conn:
+        match_count = conn.execute(
+            """
+            SELECT COUNT(DISTINCT playlist_url)
+            FROM viberate_cyanite_playlist_matches
+            WHERE lower(trim(coalesce(curator_name, ''))) = ?
+            """,
+            (name,),
+        ).fetchone()[0]
+        promoted_count = conn.execute(
+            """
+            SELECT COUNT(DISTINCT p.url)
+            FROM playlists p
+            JOIN curators c ON c.id = p.curator_id
+            WHERE c.name = ?
+            """,
+            (name,),
+        ).fetchone()[0]
+    return max(int(match_count or 0), int(promoted_count or 0))
+
+
+def curator_allowed(db_path, playlist, max_playlists_per_curator):
+    if max_playlists_per_curator <= 0:
+        return True
+    curator_name = playlist.get("curator_name") or ""
+    current_count = existing_curator_playlist_count(db_path, curator_name)
+    return current_count < max_playlists_per_curator
+
+
 def seed_overlap_count(db_path, catalog_song_id, playlist_url):
     with connect(db_path) as conn:
         return conn.execute(
@@ -155,10 +192,13 @@ def score_playlist_for_song(db_path, run, playlist):
     followers = int(playlist.get("follower_count") or 0)
     overlap = seed_overlap_count(db_path, run["catalog_song_id"], playlist.get("playlist_url") or "")
     rank = int(run.get("seed_rank") or 99)
+    new_curator_bonus = env_int("VIBERATE_NEW_CURATOR_BONUS", 12)
+    curator_playlist_count = existing_curator_playlist_count(db_path, playlist.get("curator_name") or "")
     rank_bonus = max(0, 16 - rank * 2)
     overlap_bonus = min(45, max(0, int(overlap) - 1) * 15)
     follower_bonus = 18 if 1000 <= followers <= 10000 else 12 if followers <= 50000 else 4
-    return min(100, 40 + rank_bonus + follower_bonus + overlap_bonus)
+    diversity_bonus = new_curator_bonus if curator_playlist_count == 0 else 0
+    return min(100, 40 + rank_bonus + follower_bonus + overlap_bonus + diversity_bonus)
 
 
 def save_match(db_path, mining_job_id, run, playlist):
@@ -300,6 +340,7 @@ def main():
     after_seed_sleep = env_float("VIBERATE_CYANITE_MID_AFTER_SEED_SLEEP_SECONDS", 22.0)
     max_errors = env_int("VIBERATE_CYANITE_MID_MAX_ERRORS", 20)
     resume_job_id = env_int("VIBERATE_CYANITE_MID_RESUME_JOB_ID", 0)
+    max_playlists_per_curator = env_int("VIBERATE_MAX_PLAYLISTS_PER_CURATOR", 5)
 
     queue = seed_queue(DB_PATH, max_seed_artists_per_song)
     profile = {
@@ -309,6 +350,10 @@ def main():
         "max_seed_artists_per_song": max_seed_artists_per_song,
         "follower_range": {"min": follower_min, "max": follower_max},
         "sort_order": sort_order,
+        "diversity": {
+            "max_playlists_per_curator": max_playlists_per_curator,
+            "new_curator_bonus": env_int("VIBERATE_NEW_CURATOR_BONUS", 12),
+        },
     }
     if resume_job_id:
         mining_job_id = resume_job_id
@@ -388,8 +433,11 @@ def main():
                 playlist["best_song_titles"] = run["catalog_title"]
                 playlist["fit_reason"] = f"Mid-tier Cyanite seed artist: {run['seed_artist']}"
                 if follower_ok(playlist, follower_min, follower_max):
-                    save_mined_playlist(mining_job_id, playlist, db_path=DB_PATH)
-                    saved_count += save_match(DB_PATH, mining_job_id, run, playlist)
+                    if curator_allowed(DB_PATH, playlist, max_playlists_per_curator):
+                        save_mined_playlist(mining_job_id, playlist, db_path=DB_PATH)
+                        saved_count += save_match(DB_PATH, mining_job_id, run, playlist)
+                    else:
+                        filtered_count += 1
                 else:
                     filtered_count += 1
             update_run(
