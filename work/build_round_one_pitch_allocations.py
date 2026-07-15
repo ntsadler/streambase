@@ -53,7 +53,9 @@ def init_table(db_path=DB_PATH):
 def contact_select_sql(contact_type):
     return f"""
         (SELECT value FROM contact_methods
-         WHERE curator_id=p.curator_id AND type='{contact_type}'
+         WHERE curator_id=p.curator_id
+           AND type='{contact_type}'
+           AND COALESCE(status,'new') NOT LIKE 'quarantined%'
          ORDER BY confidence_score DESC, created_at DESC LIMIT 1)
     """
 
@@ -101,6 +103,7 @@ def candidate_rows(min_fit, include_unknown=False, db_path=DB_PATH):
               SELECT 1 FROM contact_methods cm
               WHERE cm.curator_id=p.curator_id
                 AND cm.type IN ('submission_page','email','instagram','website','link_hub')
+                AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%'
           )
           AND NOT EXISTS (
               SELECT 1 FROM email_queue q

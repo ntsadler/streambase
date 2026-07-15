@@ -73,7 +73,8 @@ def candidate_rows(limit, multi_seed_first=True, db_path=DB_PATH):
                    p.curator_id,
                    (SELECT COUNT(*)
                     FROM contact_methods cm
-                    WHERE cm.curator_id = p.curator_id) AS contact_count,
+                    WHERE cm.curator_id = p.curator_id
+                      AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%') AS contact_count,
                    ROW_NUMBER() OVER (
                        PARTITION BY spt.playlist_url
                        ORDER BY COALESCE(vms.seed_match_count,0) DESC,
@@ -134,7 +135,8 @@ def all_saved_candidate_rows(limit, retry_errors=True, db_path=DB_PATH):
             p.curator_id,
             (SELECT COUNT(*)
              FROM contact_methods cm
-             WHERE cm.curator_id = p.curator_id) AS contact_count
+             WHERE cm.curator_id = p.curator_id
+               AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%') AS contact_count
         FROM playlists p
         JOIN viberate_urls vu ON vu.playlist_url = p.url
         LEFT JOIN curators c ON c.id = p.curator_id
@@ -144,6 +146,7 @@ def all_saved_candidate_rows(limit, retry_errors=True, db_path=DB_PATH):
           AND NOT EXISTS (
               SELECT 1 FROM contact_methods cm
               WHERE cm.curator_id = p.curator_id
+                AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%'
           )
           AND (cer.playlist_url IS NULL {retry_clause})
         ORDER BY

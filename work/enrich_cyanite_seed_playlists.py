@@ -31,7 +31,7 @@ def load_targets(limit: int = 0, only_missing: bool = True) -> list[dict]:
     ]
     if only_missing:
         where.append(
-            "(coalesce(p.followers,0)=0 or not exists(select 1 from contact_methods cm where cm.curator_id=p.curator_id))"
+            "(coalesce(p.followers,0)=0 or not exists(select 1 from contact_methods cm where cm.curator_id=p.curator_id and COALESCE(cm.status,'new') NOT LIKE 'quarantined%'))"
         )
     sql = f"""
         select

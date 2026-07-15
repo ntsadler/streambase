@@ -104,6 +104,7 @@ def sync_song_campaign_tasks(song_id,min_fit=70,db_path=DB_PATH):
                                 AND COALESCE(spt.fit_score,0)>=?
                                 AND lower(cur.name) NOT IN ('unknown curator','spotify')
                                 AND cm.type IN ('email','instagram','submission_page')
+                                AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%'
                                 AND COALESCE(cm.value,'')!=''
                           ),
                           primary_playlist_contacts AS (
@@ -364,9 +365,9 @@ def save_outreach_campaign_targets(campaign_id,rows,db_path=DB_PATH):
 def get_outreach_campaign_targets(campaign_id,db_path=DB_PATH):
     with connect(db_path) as c:
         rows=c.execute("""SELECT ct.*,p.name AS playlist_name,p.url AS playlist_url,p.followers,p.curator_id,c.display_name AS curator_name,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS email,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS instagram,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS submission_page
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS email,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS instagram,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC,created_at DESC LIMIT 1) AS submission_page
                   FROM outreach_campaign_targets ct
                   JOIN playlists p ON p.id=ct.playlist_id
                   LEFT JOIN curators c ON c.id=p.curator_id
@@ -531,14 +532,14 @@ def get_curator_profiles(db_path=DB_PATH):
 def get_all_playlists(db_path=DB_PATH):
     with connect(db_path) as c:
         rows=c.execute("""SELECT p.*, c.display_name AS curator_name,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email,
-                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='email' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email_confidence,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram,
-                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram_confidence,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_page,
-                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_confidence,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='website' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS website,
-                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='link_hub' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS link_hub
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='email' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='email' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS email_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='instagram' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS instagram_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_page,
+                  (SELECT confidence_score FROM contact_methods WHERE curator_id=p.curator_id AND type='submission_page' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS submission_confidence,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='website' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS website,
+                  (SELECT value FROM contact_methods WHERE curator_id=p.curator_id AND type='link_hub' AND COALESCE(status,'new') NOT LIKE 'quarantined%' ORDER BY confidence_score DESC, created_at DESC LIMIT 1) AS link_hub
            FROM playlists p
            LEFT JOIN curators c ON p.curator_id=c.id
            ORDER BY p.final_score DESC""").fetchall()

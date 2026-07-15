@@ -18,6 +18,7 @@ load_local_env()
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 URL_RE = re.compile(r"https?://[^\s<>'\"\])}]+", re.I)
 LINK_HUB_DOMAINS = {"linktr.ee", "beacons.ai", "carrd.co", "bio.site", "solo.to"}
+MAX_EMAILS_PER_RESULT = 5
 IGNORED_DOMAINS = {
     "amazon.com",
     "amzn.to",
@@ -30,6 +31,21 @@ IGNORED_DOMAINS = {
     "duckduckgo.com",
     "youtube.com",
     "youtu.be",
+}
+EMAIL_UNSAFE_DOMAINS = {
+    "github.com",
+    "huggingface.co",
+}
+EMAIL_UNSAFE_SUFFIXES = {
+    ".csv",
+    ".diff",
+    ".doc",
+    ".docx",
+    ".json",
+    ".pdf",
+    ".txt",
+    ".xls",
+    ".xlsx",
 }
 SUBMISSION_DOMAINS = {"dailyplaylists.com", "groover.co", "submithub.com"}
 STOP_WORDS = {
@@ -102,6 +118,15 @@ def _contact_type(value, label=""):
     return "website"
 
 
+def _unsafe_email_source(value):
+    parsed = urlparse(value or "")
+    domain = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower()
+    if domain in EMAIL_UNSAFE_DOMAINS or any(domain.endswith(f".{item}") for item in EMAIL_UNSAFE_DOMAINS):
+        return True
+    return any(path.endswith(suffix) for suffix in EMAIL_UNSAFE_SUFFIXES)
+
+
 def _query_for(playlist):
     name = (playlist.get("name") or playlist.get("playlist_name") or "").strip()
     curator = (playlist.get("curator_name") or "").strip()
@@ -144,6 +169,16 @@ def enrich_playlist_with_tavily(playlist, api_key=None, post=None):
     description = playlist.get("spotify_description") or ""
     methods = []
     seen = set()
+
+    if not curator or curator.lower() in {"unknown", "unknown curator"}:
+        return {
+            "ok": True,
+            "error": "",
+            "playlist_url": playlist_url,
+            "query": "",
+            "contact_methods": [],
+            "credits": 0,
+        }
 
     # Spotify descriptions are first-party curator evidence and should win ties.
     for email in EMAIL_RE.findall(description):
@@ -188,8 +223,14 @@ def enrich_playlist_with_tavily(playlist, api_key=None, post=None):
             continue
         confidence = min(92, 58 + identity * 5 + int(relevance * 8))
 
-        for email in EMAIL_RE.findall(evidence):
-            _add_method(methods, seen, "email", email, source_url, confidence)
+        found_emails = EMAIL_RE.findall(evidence)
+        if (
+            found_emails
+            and not _unsafe_email_source(source_url)
+            and len(set(email.lower() for email in found_emails)) <= MAX_EMAILS_PER_RESULT
+        ):
+            for email in found_emails:
+                _add_method(methods, seen, "email", email, source_url, confidence)
 
         candidates = [source_url, *URL_RE.findall(evidence)]
         for candidate in candidates:

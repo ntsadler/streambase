@@ -54,6 +54,7 @@ def candidate_rows(limit, retry_errors=False, db_path=DB_PATH):
           AND lower(c.name) NOT IN ('unknown curator','spotify')
           AND NOT EXISTS (
               SELECT 1 FROM contact_methods cm WHERE cm.curator_id=p.curator_id
+                AND COALESCE(cm.status,'new') NOT LIKE 'quarantined%'
           )
           AND (f.playlist_id IS NULL {retry_clause})
         ORDER BY COALESCE(p.final_score,0) DESC, COALESCE(p.followers,0) ASC, p.id ASC
