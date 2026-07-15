@@ -132,14 +132,19 @@ def follow_playlist(client: SpotifyAPI, limiter: MinuteLimiter, playlist: dict, 
     playlist_id = extract_playlist_id(playlist["playlist_url"])
     if not playlist_id:
         raise RuntimeError("Could not parse Spotify playlist id")
-    limiter.wait()
-    resp = requests.put(
-        f"{API_BASE}/playlists/{playlist_id}/followers",
-        headers={**client._headers(user=True), "Content-Type": "application/json"},
-        data=json.dumps({"public": bool(public_follow)}),
-        timeout=client.timeout,
-    )
-    limiter.mark()
+    resp = None
+    for attempt in range(2):
+        limiter.wait()
+        resp = requests.put(
+            f"{API_BASE}/playlists/{playlist_id}/followers",
+            headers={**client._headers(user=True), "Content-Type": "application/json"},
+            data=json.dumps({"public": bool(public_follow)}),
+            timeout=client.timeout,
+        )
+        limiter.mark()
+        if resp.status_code != 401 or attempt:
+            break
+        client._user_token = ""
     if resp.status_code == 429:
         retry_after = int(resp.headers.get("Retry-After") or 3600)
         raise RuntimeError(f"Spotify 429 rate limit; retry after {retry_after} seconds")
