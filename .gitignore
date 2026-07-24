@@ -10,6 +10,8 @@ local_data_test/
 data/*.sqlite
 work/savepoints/*.sqlite
 data/audio_uploads/
+catalog_data/
+catalog_build/
 data/song_profiles.json
 data/artist_sound_profile.json
 data/report.json

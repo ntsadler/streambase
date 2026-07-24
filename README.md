@@ -130,3 +130,41 @@ export GITHUB_BRANCH="main"
 ```
 
 The uploader excludes `local_data/`, SQLite databases, reports, raw imports, zips, caches, and virtualenv files.
+
+## Read-only catalog API for Showforge
+
+Streambase includes a separate ASGI service that exposes safe catalog metadata
+and range-capable audio without adding routes to the Streamlit app. It never
+uses the read-write database helper, never returns local file paths, and only
+serves MP3/WAV basenames recorded in the `songs` table from the configured
+audio directory.
+
+Generate a strong bearer token for Showforge, store only its lowercase SHA-256
+digest in Streambase, and keep the raw token in Showforge's server-side secret
+store:
+
+```bash
+export STREAMBASE_CATALOG_TOKEN_SHA256="<sha256-of-the-raw-token>"
+```
+
+Optional deployment overrides default to the canonical local catalog:
+
+```bash
+export STREAMBASE_CATALOG_DB_PATH="local_data/streambase.sqlite"
+export STREAMBASE_CATALOG_AUDIO_ROOT="data/audio_uploads"
+```
+
+Run the API from the repository root:
+
+```bash
+.venv/bin/uvicorn src.catalog_api:app --host 127.0.0.1 --port 8080
+```
+
+Authenticated routes are `GET /v1/tracks`, `GET /v1/tracks/{id}`, and
+`GET|HEAD /v1/tracks/{id}/audio`. List pagination uses a signed, filter-bound
+opaque `nextCursor`; pass it back unchanged as the `cursor` query parameter.
+The only unauthenticated route is the minimal `GET /healthz` check.
+
+The database and audio library are intentionally ignored by Git. A cloud
+deployment must mount or privately sync both paths; source deployment alone
+does not include the catalog.
